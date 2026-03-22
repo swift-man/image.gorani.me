@@ -10,6 +10,7 @@ from .config import Settings
 
 
 def _sql_literal(value: object) -> str:
+    # psql CLI를 쓰는 구조라서 최소한의 문자열 이스케이프를 직접 처리한다.
     if value is None:
         return "NULL"
     if isinstance(value, bool):
@@ -22,6 +23,8 @@ def _sql_literal(value: object) -> str:
 
 @dataclass
 class VariantRecord:
+    """파생 이미지 한 건을 표현한다."""
+
     kind: str
     format: str
     width: int
@@ -33,6 +36,8 @@ class VariantRecord:
 
 @dataclass
 class AssetRecord:
+    """원본 이미지 한 건의 메타데이터를 표현한다."""
+
     sha256: str
     original_filename: str
     content_type: str
@@ -46,6 +51,8 @@ class AssetRecord:
 
 @dataclass
 class AssetLookup:
+    """조회 API와 삭제 로직에서 함께 쓰는 합성 조회 결과."""
+
     asset_id: int
     sha256: str
     storage_path: str
@@ -55,16 +62,20 @@ class AssetLookup:
 
 
 class Database:
+    """psql CLI를 통해 PostgreSQL과 통신하는 얇은 저장소 계층."""
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
     def _psql_base_command(self) -> list[str]:
+        # DATABASE_URL 또는 PGDATABASE가 잡혀 있으면 그대로 사용한다.
         command = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\t"]
         if self.settings.pg_database:
             command.append(self.settings.pg_database)
         return command
 
     def run_sql(self, sql: str) -> str:
+        # stdout만 반환해서 단순 조회/업데이트 공통 경로로 재사용한다.
         completed = subprocess.run(
             self._psql_base_command() + ["-c", sql],
             check=True,
@@ -74,6 +85,7 @@ class Database:
         return completed.stdout.strip()
 
     def apply_schema(self, schema_path: Path) -> None:
+        # 서버 시작 시 필요한 테이블이 없으면 자동 생성한다.
         subprocess.run(
             self._psql_base_command() + ["-f", str(schema_path)],
             check=True,
@@ -82,6 +94,7 @@ class Database:
         )
 
     def insert_asset(self, asset: AssetRecord, variants: Iterable[VariantRecord]) -> int:
+        # 같은 해시가 다시 들어오면 기존 레코드를 active 상태로 되살린다.
         sql = f"""
 WITH inserted AS (
     INSERT INTO assets (
@@ -116,10 +129,12 @@ SELECT id FROM inserted;
         raw = self.run_sql(sql)
         asset_id = int(raw.splitlines()[-1])
         for variant in variants:
+            # 파생 이미지는 원본 ID를 받아 순차적으로 upsert 한다.
             self.insert_variant(asset_id, variant)
         return asset_id
 
     def insert_variant(self, asset_id: int, variant: VariantRecord) -> None:
+        # 동일한 kind(예: thumb_160)는 덮어쓰기보다 upsert로 유지한다.
         sql = f"""
 INSERT INTO asset_variants (
     asset_id, kind, format, width, height, byte_size, storage_path, public_url
@@ -146,6 +161,7 @@ SET
         self.run_sql(sql)
 
     def find_asset(self, sha256: str) -> Optional[AssetLookup]:
+        # 조회용 JSON을 DB에서 조립해 오면 Python 쪽 매핑이 단순해진다.
         sql = f"""
 SELECT json_build_object(
     'asset_id', a.id,
@@ -192,6 +208,7 @@ LIMIT 1;
         )
 
     def mark_deleted(self, sha256: str) -> None:
+        # 파일 삭제 이후 DB 상태를 deleted로 바꾸고 deleted_at도 기록한다.
         sql = f"""
 UPDATE asset_variants
 SET deleted_at = NOW()

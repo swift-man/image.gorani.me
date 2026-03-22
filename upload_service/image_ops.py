@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 ALLOWED_CONTENT_TYPES = {
+    # 원본 업로드로 허용할 MIME 타입과 내부 확장자 매핑이다.
     "image/jpeg": ".jpg",
     "image/png": ".png",
     "image/gif": ".gif",
@@ -16,6 +17,7 @@ ALLOWED_CONTENT_TYPES = {
 }
 
 THUMBNAIL_FORMATS = {
+    # 현재 환경에서 썸네일 출력 시 사용할 수 있는 확장자 매핑이다.
     "jpeg": ".jpg",
     "png": ".png",
     "webp": ".webp",
@@ -24,6 +26,8 @@ THUMBNAIL_FORMATS = {
 
 @dataclass
 class ImageInfo:
+    """이미지에서 추출한 핵심 메타데이터."""
+
     content_type: str
     width: int
     height: int
@@ -31,6 +35,7 @@ class ImageInfo:
 
 
 def detect_content_type(path: Path) -> str:
+    # 확장자 대신 실제 파일 내용을 기준으로 MIME 타입을 판단한다.
     completed = subprocess.run(
         ["file", "--brief", "--mime-type", str(path)],
         check=True,
@@ -41,12 +46,14 @@ def detect_content_type(path: Path) -> str:
 
 
 def thumbnail_extension(output_format: str) -> str:
+    # 파일명 생성 시 포맷과 확장자가 일관되게 맞도록 분리해둔다.
     if output_format not in THUMBNAIL_FORMATS:
         raise ValueError(f"Unsupported thumbnail format: {output_format}")
     return THUMBNAIL_FORMATS[output_format]
 
 
 def inspect_image(path: Path) -> ImageInfo:
+    # sips로 픽셀 크기를 읽고, file 명령으로 MIME 타입을 검증한다.
     content_type = detect_content_type(path)
     if content_type not in ALLOWED_CONTENT_TYPES:
         raise ValueError(f"Unsupported content type: {content_type}")
@@ -60,6 +67,7 @@ def inspect_image(path: Path) -> ImageInfo:
     width = None
     height = None
     for raw_line in completed.stdout.splitlines():
+        # macOS sips 출력은 "pixelWidth: 123" 형태라서 직접 파싱한다.
         line = raw_line.strip()
         if line.startswith("pixelWidth:"):
             width = int(line.split(":", 1)[1].strip())
@@ -76,6 +84,7 @@ def inspect_image(path: Path) -> ImageInfo:
 
 
 def create_thumbnail(source: Path, destination: Path, width: int, output_format: str) -> ImageInfo:
+    # 썸네일 대상 폴더는 미리 준비해두고, sips로 리사이즈+포맷 변환을 한다.
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         [
@@ -97,6 +106,7 @@ def create_thumbnail(source: Path, destination: Path, width: int, output_format:
 
 
 def guess_download_name(filename: str, fallback_ext: str) -> str:
+    # 다운로드용 원본 이름은 사용자 이름을 최대한 살리되 확장자는 보정한다.
     guessed_type, guessed_encoding = mimetypes.guess_type(filename)
     if guessed_type and not guessed_encoding:
         return filename
