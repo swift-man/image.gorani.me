@@ -1,0 +1,8 @@
+[project]
+name = "image-gorani-upload"
+version = "0.1.0"
+description = "Upload-side image storage service for image.gorani.me"
+requires-python = ">=3.9"
+
+[project.scripts]
+image-upload = "upload_service.__main__:main"
