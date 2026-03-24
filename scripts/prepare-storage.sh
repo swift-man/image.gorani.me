@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-storage_root="${IMAGE_STORAGE_ROOT:-/Users/m4_26/mnt/gorani-images/image-store}"
+storage_root="${IMAGE_STORAGE_ROOT:-/Volumes/gorani-images/image-store}"
 
 mkdir -p "${storage_root}/original"
 mkdir -p "${storage_root}/variants"

@@ -57,26 +57,26 @@ Important values:
 Current shared folder:
 - Windows share: `\\\\DESKTOP-0217PLD\\gorani-images`
 - On macOS, mount it first and point `IMAGE_STORAGE_ROOT` at the mounted path
-- Working example mount path for this machine: `/Users/m4_26/mnt/gorani-images/image-store`
+- Working example mount path for this machine: `/Volumes/gorani-images/image-store`
 
 Example mount command on macOS:
 
 ```bash
-mkdir -p ~/mnt/gorani-images
-mount_smbfs //USERNAME@DESKTOP-0217PLD/gorani-images ~/mnt/gorani-images
+mkdir -p /Volumes/gorani-images
+mount_smbfs //USERNAME@DESKTOP-0217PLD/gorani-images /Volumes/gorani-images
 ```
 
 Prepare storage directories:
 
 ```bash
-IMAGE_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store ./scripts/prepare-storage.sh
+IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store ./scripts/prepare-storage.sh
 ```
 
 ## Run
 
 ```bash
-IMAGE_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
-IMAGE_THUMBNAIL_FORMAT=jpeg \
+IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store \
+IMAGE_THUMBNAIL_FORMAT=webp \
 IMAGE_API_KEYS='replace-me' \
 ./scripts/run-service.sh
 ```
@@ -87,11 +87,19 @@ The app auto-applies [schema.sql](/Users/m4_26/image.gorani.me/sql/schema.sql) o
 
 It currently talks to PostgreSQL via the `psql` CLI, which keeps the project dependency-light for now.
 
+If older rows were stored under the wrong macOS mount path, fix them with:
+
+```bash
+OLD_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
+./scripts/fix-storage-root.sh
+```
+
 ## Current Constraints
 
-- image inspection and thumbnail generation depend on macOS `sips`
-- supported input formats depend on what `sips` and `file` can read
-- this machine cannot write WebP thumbnails with `sips`, so `jpeg` is the safe default thumbnail format here
+- image inspection depends on macOS `sips`
+- WebP thumbnail generation uses Pillow because this machine cannot write WebP reliably with `sips`
+- supported input formats depend on what `sips`, `file`, and Pillow can read
 - this version assumes the shared folder is already mounted before startup
 - deletes are hard file deletes plus metadata soft-delete
 

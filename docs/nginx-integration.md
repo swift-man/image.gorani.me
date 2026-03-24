@@ -31,9 +31,17 @@ Recommended path contract:
 - originals: `/i/original/<aa>/<bb>/<sha256>.<ext>`
 - variants: `/i/variants/<aa>/<bb>/<sha256>__thumb_<width>.<ext>`
 
+Optional namespaced path contract for security symbols:
+- originals: `/i/symbols/original/<aa>/<bb>/<sha256>.<ext>`
+- variants: `/i/symbols/variants/<aa>/<bb>/<sha256>__thumb_<width>.<ext>`
+
 Recommended on-disk contract:
 - `original/<aa>/<bb>/<sha256>.<ext>`
 - `variants/<aa>/<bb>/<sha256>__thumb_<width>.<ext>`
+
+Optional namespaced on-disk contract for security symbols:
+- `symbols/original/<aa>/<bb>/<sha256>.<ext>`
+- `symbols/variants/<aa>/<bb>/<sha256>__thumb_<width>.<ext>`
 
 Recommended absolute storage root examples:
 - Windows/Nginx host: `C:\\path\\to\\gorani-images\\image-store` or the actual local NTFS directory behind the share
@@ -90,9 +98,9 @@ Important note:
 If thumbnail generation is enabled, Nginx should serve them as plain static files the same way as originals.
 
 Example variant names:
-- `<sha256>__thumb_160.jpg`
-- `<sha256>__thumb_320.jpg`
-- `<sha256>__thumb_640.jpg`
+- `<sha256>__thumb_160.webp`
+- `<sha256>__thumb_320.webp`
+- `<sha256>__thumb_640.webp`
 
 The exact variant list and output format should be treated as a shared contract between the upload project and the Nginx project.
 

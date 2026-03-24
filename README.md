@@ -72,13 +72,13 @@
 
 - 업로드 실행 환경: macOS
 - 공유폴더: `\\DESKTOP-0217PLD\gorani-images`
-- macOS 마운트 예시: `/Users/m4_26/mnt/gorani-images`
-- 실제 저장 루트 예시: `/Users/m4_26/mnt/gorani-images/image-store`
+- macOS 마운트 예시: `/Volumes/gorani-images`
+- 실제 저장 루트 예시: `/Volumes/gorani-images/image-store`
 - PostgreSQL: 로컬 설치 사용
-- 썸네일 기본 포맷: `jpeg`
+- 썸네일 기본 포맷: `webp`
 
 중요한 점:
-- 이 macOS 환경의 `sips`는 `webp` 출력이 안정적으로 되지 않아 썸네일 기본값을 `jpeg`로 두었습니다.
+- 이 macOS 환경의 `sips`는 `webp` 출력을 안정적으로 못 해서, `webp` 썸네일은 Pillow 인코더로 생성합니다.
 - 원본은 해시 기반 경로에 저장됩니다.
 - 파일명은 사용자 업로드 이름이 아니라 내부 해시 기반 이름을 사용합니다.
 
@@ -87,13 +87,14 @@
 실행 전에 아래 항목이 준비되어 있어야 합니다.
 
 - `python3`
+- `Pillow`
 - `psql`
 - macOS 기본 `sips`
 - macOS 기본 `file`
 - 접근 가능한 PostgreSQL 서버
 - 쓰기 가능한 SMB 공유폴더
 
-현재 구현은 별도 Python 패키지 설치 없이 동작합니다.
+최초 실행 전에는 Python 의존성을 한 번 설치해야 합니다.
 
 ## 설치
 
@@ -102,6 +103,8 @@
 ```bash
 git clone https://github.com/swift-man/image.gorani.me.git
 cd image.gorani.me
+python3 -m venv .venv
+.venv/bin/pip install .
 ```
 
 ### 2. 공유폴더 마운트
@@ -109,15 +112,15 @@ cd image.gorani.me
 macOS에서 SMB 공유폴더를 먼저 마운트해야 합니다.
 
 ```bash
-mkdir -p ~/mnt/gorani-images
-mount_smbfs //ksj@DESKTOP-0217PLD/gorani-images ~/mnt/gorani-images
+mkdir -p /Volumes/gorani-images
+mount_smbfs //ksj@DESKTOP-0217PLD/gorani-images /Volumes/gorani-images
 ```
 
 마운트 후 아래가 되어야 합니다.
 
 ```bash
-ls -la ~/mnt/gorani-images
-touch ~/mnt/gorani-images/.write-test && rm ~/mnt/gorani-images/.write-test
+ls -la /Volumes/gorani-images
+touch /Volumes/gorani-images/.write-test && rm /Volumes/gorani-images/.write-test
 ```
 
 위 `touch`가 실패하면 업로드 서비스도 공유폴더에 저장할 수 없습니다.
@@ -132,14 +135,14 @@ touch ~/mnt/gorani-images/.write-test && rm ~/mnt/gorani-images/.write-test
 자동 준비 스크립트:
 
 ```bash
-IMAGE_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store ./scripts/prepare-storage.sh
+IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store ./scripts/prepare-storage.sh
 ```
 
 직접 만들어도 됩니다.
 
 ```bash
-mkdir -p /Users/m4_26/mnt/gorani-images/image-store/original
-mkdir -p /Users/m4_26/mnt/gorani-images/image-store/variants
+mkdir -p /Volumes/gorani-images/image-store/original
+mkdir -p /Volumes/gorani-images/image-store/variants
 ```
 
 ### 4. PostgreSQL 준비
@@ -156,6 +159,14 @@ mkdir -p /Users/m4_26/mnt/gorani-images/image-store/variants
 
 ```bash
 export PGDATABASE=postgres
+```
+
+기존 DB에 잘못된 경로가 이미 저장되어 있다면 아래 스크립트로 한 번에 정리할 수 있습니다.
+
+```bash
+OLD_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
+./scripts/fix-storage-root.sh
 ```
 
 ### 5. 환경변수 준비
@@ -185,8 +196,8 @@ export PGDATABASE=postgres
 ```bash
 cd /Users/m4_26/image.gorani.me
 
-IMAGE_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
-IMAGE_THUMBNAIL_FORMAT=jpeg \
+IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store \
+IMAGE_THUMBNAIL_FORMAT=webp \
 IMAGE_API_KEYS='replace-me-with-a-real-secret' \
 PGDATABASE=postgres \
 ./scripts/run-service.sh
@@ -202,7 +213,7 @@ Listening on http://127.0.0.1:8080
 
 ```bash
 IMAGE_UPLOAD_PORT=8090 \
-IMAGE_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 IMAGE_API_KEYS='replace-me-with-a-real-secret' \
 PGDATABASE=postgres \
 ./scripts/run-service.sh
@@ -249,7 +260,7 @@ curl -X POST \
   "variants": [
     {
       "kind": "thumb_160",
-      "url": "/i/variants/ab/cd/<sha256>__thumb_160.jpg",
+      "url": "/i/variants/ab/cd/<sha256>__thumb_160.webp",
       "width": 160,
       "height": 160,
       "bytes": 5364
@@ -287,7 +298,9 @@ curl -X DELETE \
 예시:
 
 - 원본: `original/43/b7/<sha256>.png`
-- 썸네일: `variants/43/b7/<sha256>__thumb_160.jpg`
+- 썸네일: `variants/43/b7/<sha256>__thumb_160.webp`
+- 종목 로고 namespace 예시 원본: `symbols/original/43/b7/<sha256>.png`
+- 종목 로고 namespace 예시 썸네일: `symbols/variants/43/b7/<sha256>__thumb_160.webp`
 
 이 구조의 장점:
 
@@ -308,8 +321,8 @@ image-store/
 └── variants/
     └── 43/
         └── b7/
-            ├── 43b78bfe96a88f7f2b500ee07b389d9838d8c10b698d96223513b865415b967a__thumb_160.jpg
-            └── 43b78bfe96a88f7f2b500ee07b389d9838d8c10b698d96223513b865415b967a__thumb_320.jpg
+            ├── 43b78bfe96a88f7f2b500ee07b389d9838d8c10b698d96223513b865415b967a__thumb_160.webp
+            └── 43b78bfe96a88f7f2b500ee07b389d9838d8c10b698d96223513b865415b967a__thumb_320.webp
 ```
 
 첫 두 단계 폴더인 `43/b7` 같은 값은 SHA-256 앞부분을 잘라서 만든 것입니다. 이렇게 하면 한 디렉터리에 파일이 과도하게 몰리는 것을 줄일 수 있습니다.
@@ -352,6 +365,7 @@ Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](doc
 - Nginx는 그 파일을 직접 읽어 서빙함
 - 앱을 거치지 않고 정적 파일로 바로 응답함
 - 공개 URL 규칙은 업로드 서비스와 Nginx가 동일하게 맞춰야 함
+- 종목 로고처럼 별도 namespace가 필요한 경우 `/i/symbols/...`와 `symbols/...` 경로를 같은 방식으로 맞춰야 함
 
 ## 현재 구현 제약
 
