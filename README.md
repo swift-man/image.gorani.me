@@ -247,6 +247,8 @@ smb://ksj@DESKTOP-0217PLD/gorani-images
 ./scripts/uninstall-launch-agent.sh
 ```
 
+`restart-service.sh`는 재시작 요청만 보내고 끝나지 않습니다. 최대 30초 동안 `/healthz` 성공을 기다린 뒤 SMB, LaunchAgent, HTTP 상태와 최근 서비스 로그를 출력합니다. 제한시간 안에 복구되지 않으면 최근 오류 로그를 보여주고 종료 코드 `1`을 반환합니다.
+
 LaunchAgent는 다음 순서로 동작합니다.
 
 1. Windows의 `DESKTOP-0217PLD:445`가 열릴 때까지 기다립니다.
