@@ -15,7 +15,7 @@ def _normalize_root(value: str, variable_name: str) -> str:
 
 
 def update_storage_root(database: Database, old_root: str, new_root: str) -> None:
-    """원본과 파생 이미지 경로를 하나의 PostgreSQL 트랜잭션에서 보정한다."""
+    """활성 메타데이터와 삭제 큐 경로를 한 트랜잭션에서 보정한다."""
 
     old_literal = _sql_literal(old_root)
     new_literal = _sql_literal(new_root)
@@ -24,7 +24,9 @@ def update_storage_root(database: Database, old_root: str, new_root: str) -> Non
 BEGIN;
 DO $$
 BEGIN
-    IF to_regclass('assets') IS NULL OR to_regclass('asset_variants') IS NULL THEN
+    IF to_regclass('assets') IS NULL
+       OR to_regclass('asset_variants') IS NULL
+       OR to_regclass('pending_file_deletions') IS NULL THEN
         RAISE EXCEPTION 'image metadata tables do not exist in the selected database';
     END IF;
 END
@@ -37,6 +39,12 @@ WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 UPDATE asset_variants
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
+
+-- 아직 처리하지 않은 삭제 항목도 새 마운트 경로를 사용해야 실제 파일을 지울 수 있다.
+UPDATE pending_file_deletions
+SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
+WHERE completed_at IS NULL
+  AND left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 COMMIT;
 """
     )

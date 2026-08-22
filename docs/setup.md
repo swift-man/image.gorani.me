@@ -54,7 +54,7 @@ Important values:
 - `IMAGE_MAX_WORKERS`: maximum concurrent HTTP request workers
 - `IMAGE_HTTP_TIMEOUT_SECONDS`: accepted socket read timeout
 - `IMAGE_CLEANUP_BATCH_SIZE`: background file cleanup batch size
-- `IMAGE_COMMAND_TIMEOUT_SECONDS`: timeout for `file` and `sips`
+- `IMAGE_COMMAND_TIMEOUT_SECONDS`: timeout for `file`, `sips`, and Pillow workers
 - `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL connection, lock, and query timeout
 - `IMAGE_ENABLE_THUMBNAILS`: `1` or `0`
 - `IMAGE_THUMBNAIL_WIDTHS`: comma-separated widths

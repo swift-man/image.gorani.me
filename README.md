@@ -396,8 +396,9 @@ Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](doc
 
 ## 현재 구현 제약
 
-- 이미지 검사와 썸네일 생성은 macOS `sips` 기반입니다.
-- 현재 환경에서는 `webp` 썸네일 출력보다 `jpeg`가 안전합니다.
+- MIME 타입과 기본 이미지 크기 검사는 `file`과 macOS `sips`를 사용합니다.
+- JPEG/TIFF의 EXIF 방향 검사와 기본 `webp` 썸네일 생성은 제한시간이 적용된 Pillow 자식 프로세스에서 수행합니다.
+- `jpeg` 또는 `png` 썸네일 포맷을 명시하면 `sips`로 생성합니다.
 - 읽기 API는 공개 상태이고, 쓰기 API만 API key로 보호합니다.
 - PostgreSQL 연결은 현재 Python 드라이버가 아니라 `psql` CLI를 사용합니다.
 

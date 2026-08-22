@@ -652,6 +652,9 @@ class DatabaseSafetyTests(unittest.TestCase):
         self.assertIn("BEGIN;", sql)
         self.assertIn("to_regclass('assets')", sql)
         self.assertIn("to_regclass('asset_variants')", sql)
+        self.assertIn("to_regclass('pending_file_deletions')", sql)
+        self.assertIn("UPDATE pending_file_deletions", sql)
+        self.assertIn("WHERE completed_at IS NULL", sql)
         self.assertIn("COMMIT;", sql)
         self.assertNotIn("ksj's_%_root", sql)
 
