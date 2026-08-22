@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import json
 import mimetypes
 import subprocess
+import sys
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
+
+from .errors import ImageProcessingTimeoutError, InvalidImageError
 
 
 ALLOWED_CONTENT_TYPES = {
@@ -23,6 +28,14 @@ THUMBNAIL_FORMATS = {
     "webp": ".webp",
 }
 
+ORIENTATION_CONTENT_TYPES = {
+    # Pillow가 EXIF 방향을 읽고 썸네일에도 같은 보정을 적용할 수 있는 입력 형식이다.
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+}
+
 
 @dataclass
 class ImageInfo:
@@ -34,13 +47,29 @@ class ImageInfo:
     file_ext: str
 
 
-def detect_content_type(path: Path) -> str:
+def _run_image_command(
+    command: list[str],
+    timeout_seconds: int,
+) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ImageProcessingTimeoutError(
+            f"Image command exceeded {timeout_seconds} seconds"
+        ) from exc
+
+
+def detect_content_type(path: Path, timeout_seconds: int = 30) -> str:
     # 확장자 대신 실제 파일 내용을 기준으로 MIME 타입을 판단한다.
-    completed = subprocess.run(
+    completed = _run_image_command(
         ["file", "--brief", "--mime-type", str(path)],
-        check=True,
-        capture_output=True,
-        text=True,
+        timeout_seconds,
     )
     return completed.stdout.strip()
 
@@ -52,29 +81,46 @@ def thumbnail_extension(output_format: str) -> str:
     return THUMBNAIL_FORMATS[output_format]
 
 
-def inspect_image(path: Path) -> ImageInfo:
+def inspect_image(
+    path: Path,
+    timeout_seconds: int = 30,
+    max_pixels: int = 40_000_000,
+) -> ImageInfo:
     # sips로 픽셀 크기를 읽고, file 명령으로 MIME 타입을 검증한다.
-    content_type = detect_content_type(path)
+    try:
+        content_type = detect_content_type(path, timeout_seconds)
+    except subprocess.CalledProcessError as exc:
+        raise InvalidImageError("Unable to identify uploaded image") from exc
     if content_type not in ALLOWED_CONTENT_TYPES:
-        raise ValueError(f"Unsupported content type: {content_type}")
+        raise InvalidImageError(f"Unsupported content type: {content_type}")
 
-    completed = subprocess.run(
-        ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = _run_image_command(
+            ["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            timeout_seconds,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise InvalidImageError("Unable to decode uploaded image") from exc
     width = None
     height = None
-    for raw_line in completed.stdout.splitlines():
-        # macOS sips 출력은 "pixelWidth: 123" 형태라서 직접 파싱한다.
-        line = raw_line.strip()
-        if line.startswith("pixelWidth:"):
-            width = int(line.split(":", 1)[1].strip())
-        elif line.startswith("pixelHeight:"):
-            height = int(line.split(":", 1)[1].strip())
-    if width is None or height is None:
-        raise ValueError(f"Unable to inspect image dimensions for {path}")
+    try:
+        for raw_line in completed.stdout.splitlines():
+            # macOS sips 출력은 "pixelWidth: 123" 형태라서 직접 파싱한다.
+            line = raw_line.strip()
+            if line.startswith("pixelWidth:"):
+                width = int(line.split(":", 1)[1].strip())
+            elif line.startswith("pixelHeight:"):
+                height = int(line.split(":", 1)[1].strip())
+    except ValueError as exc:
+        raise InvalidImageError("Invalid uploaded image dimensions") from exc
+    if width is None or height is None or width <= 0 or height <= 0:
+        raise InvalidImageError("Unable to inspect uploaded image dimensions")
+    if content_type in ORIENTATION_CONTENT_TYPES:
+        width, height = inspect_oriented_dimensions_with_pillow(
+            path,
+            timeout_seconds,
+            max_pixels,
+        )
     return ImageInfo(
         content_type=content_type,
         width=width,
@@ -83,12 +129,26 @@ def inspect_image(path: Path) -> ImageInfo:
     )
 
 
-def create_thumbnail(source: Path, destination: Path, width: int, output_format: str) -> ImageInfo:
+def create_thumbnail(
+    source: Path,
+    destination: Path,
+    width: int,
+    output_format: str,
+    timeout_seconds: int = 30,
+    max_pixels: int = 40_000_000,
+) -> ImageInfo:
     # 썸네일 대상 폴더는 미리 준비해두고, 포맷에 맞는 인코더로 리사이즈+변환을 한다.
     destination.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "webp":
-        return create_thumbnail_with_pillow(source, destination, width, output_format)
-    subprocess.run(
+        return create_thumbnail_with_pillow(
+            source,
+            destination,
+            width,
+            output_format,
+            timeout_seconds,
+            max_pixels,
+        )
+    _run_image_command(
         [
             "sips",
             "-s",
@@ -100,24 +160,136 @@ def create_thumbnail(source: Path, destination: Path, width: int, output_format:
             "--out",
             str(destination),
         ],
-        check=True,
-        capture_output=True,
-        text=True,
+        timeout_seconds,
     )
-    return inspect_image(destination)
+    return inspect_image(destination, timeout_seconds, max_pixels)
 
 
-def create_thumbnail_with_pillow(source: Path, destination: Path, width: int, output_format: str) -> ImageInfo:
-    # 이 macOS 환경의 sips는 WebP 출력을 안정적으로 못 해서 Pillow 인코더를 사용한다.
+def _run_pillow_worker(
+    arguments: list[str],
+    timeout_seconds: int,
+    operation_name: str,
+) -> subprocess.CompletedProcess:
     try:
-        from PIL import Image
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("WebP thumbnail generation requires Pillow. Install project dependencies first.") from exc
+        completed = subprocess.run(
+            [sys.executable, "-m", "upload_service.pillow_worker", *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ImageProcessingTimeoutError(
+            f"{operation_name} exceeded {timeout_seconds} seconds"
+        ) from exc
+    if completed.returncode == 2:
+        detail = completed.stderr.strip() or "Unable to decode uploaded image"
+        raise InvalidImageError(detail)
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or "unknown Pillow worker error"
+        raise RuntimeError(f"{operation_name} failed: {detail}")
+    return completed
 
-    with Image.open(source) as image:
-        working = image.convert("RGBA")
-        target_height = max(1, round((working.height * width) / working.width))
-        resized = working.resize((width, target_height), Image.Resampling.LANCZOS)
+
+def inspect_oriented_dimensions_with_pillow(
+    source: Path,
+    timeout_seconds: int,
+    max_pixels: int,
+) -> tuple[int, int]:
+    completed = _run_pillow_worker(
+        ["inspect", str(source), str(max_pixels)],
+        timeout_seconds,
+        "Pillow metadata inspection",
+    )
+    try:
+        payload = json.loads(completed.stdout)
+        width = int(payload["width"])
+        height = int(payload["height"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Pillow metadata worker returned invalid output") from exc
+    if width <= 0 or height <= 0:
+        raise InvalidImageError("Unable to inspect uploaded image dimensions")
+    return width, height
+
+
+def create_thumbnail_with_pillow(
+    source: Path,
+    destination: Path,
+    width: int,
+    output_format: str,
+    timeout_seconds: int = 30,
+    max_pixels: int = 40_000_000,
+) -> ImageInfo:
+    # Pillow 디코딩도 외부 프로세스로 격리해 CPU 작업에 제한시간을 강제한다.
+    _run_pillow_worker(
+        [
+            "render",
+            str(source),
+            str(destination),
+            str(width),
+            output_format,
+            str(max_pixels),
+        ],
+        timeout_seconds,
+        "Pillow thumbnail generation",
+    )
+    return inspect_image(destination, timeout_seconds, max_pixels)
+
+
+def render_thumbnail_with_pillow(
+    source: Path,
+    destination: Path,
+    width: int,
+    output_format: str,
+    max_pixels: int,
+) -> None:
+    """격리된 작업 프로세스 안에서 EXIF 방향을 반영해 썸네일을 생성한다."""
+
+    try:
+        from PIL import Image, ImageOps, UnidentifiedImageError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "WebP thumbnail generation requires Pillow. Install project dependencies first."
+        ) from exc
+
+    resized = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                if image.width * image.height > max_pixels:
+                    raise InvalidImageError(
+                        f"Image exceeds max pixel count of {max_pixels}"
+                    )
+                # 입력 형식과 무관하게 EXIF 방향을 실제 픽셀에 반영한 뒤 메타데이터를 제거한다.
+                oriented = ImageOps.exif_transpose(image)
+                try:
+                    has_transparency = oriented.mode in {"RGBA", "LA"} or (
+                        "transparency" in oriented.info
+                    )
+                    working = oriented.convert("RGBA" if has_transparency else "RGB")
+                    try:
+                        target_height = max(
+                            1,
+                            round((working.height * width) / working.width),
+                        )
+                        resized = working.resize(
+                            (width, target_height),
+                            Image.Resampling.LANCZOS,
+                        )
+                    finally:
+                        working.close()
+                finally:
+                    if oriented is not image:
+                        oriented.close()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise InvalidImageError("Image exceeds safe decoder pixel limits") from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise InvalidImageError("Unable to decode uploaded image") from exc
+
+    if resized is None:
+        raise InvalidImageError("Unable to resize uploaded image")
+    try:
         resized.save(
             destination,
             format=output_format.upper(),
@@ -125,13 +297,54 @@ def create_thumbnail_with_pillow(source: Path, destination: Path, width: int, ou
             method=6,
             lossless=False,
         )
-    return inspect_image(destination)
+    finally:
+        resized.close()
+
+
+def read_oriented_dimensions_with_pillow(
+    source: Path,
+    max_pixels: int,
+) -> tuple[int, int]:
+    """Pillow가 읽은 EXIF 방향을 반영해 화면 기준 크기를 반환한다."""
+
+    try:
+        from PIL import Image, UnidentifiedImageError
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "Image metadata inspection requires Pillow. Install project dependencies first."
+        ) from exc
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                if image.width * image.height > max_pixels:
+                    raise InvalidImageError(
+                        f"Image exceeds max pixel count of {max_pixels}"
+                    )
+                orientation = image.getexif().get(274, 1)
+                if orientation in {5, 6, 7, 8}:
+                    return image.height, image.width
+                return image.width, image.height
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise InvalidImageError("Image exceeds safe decoder pixel limits") from exc
+    except (UnidentifiedImageError, OSError) as exc:
+        raise InvalidImageError("Unable to decode uploaded image") from exc
 
 
 def guess_download_name(filename: str, fallback_ext: str) -> str:
     # 다운로드용 원본 이름은 사용자 이름을 최대한 살리되 확장자는 보정한다.
-    guessed_type, guessed_encoding = mimetypes.guess_type(filename)
+    basename = Path(filename.replace("\\", "/")).name.replace("\x00", "").strip()
+    if not basename:
+        basename = "upload" + fallback_ext
+    guessed_type, guessed_encoding = mimetypes.guess_type(basename)
     if guessed_type and not guessed_encoding:
-        return filename
-    stem = Path(filename).stem or "upload"
-    return stem + fallback_ext
+        download_name = basename
+    else:
+        stem = Path(basename).stem or "upload"
+        download_name = stem + fallback_ext
+
+    # 메타데이터와 psql 명령 인자가 비정상적으로 커지지 않도록 이름 길이를 제한한다.
+    suffix = Path(download_name).suffix
+    max_stem_length = max(1, 200 - len(suffix))
+    return Path(download_name).stem[:max_stem_length] + suffix

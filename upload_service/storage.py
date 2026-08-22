@@ -10,7 +10,14 @@ from typing import Iterable, List
 
 from .config import Settings
 from .db import AssetRecord, VariantRecord
-from .image_ops import ImageInfo, create_thumbnail, guess_download_name, inspect_image, thumbnail_extension
+from .errors import UploadTooLargeError
+from .image_ops import (
+    ImageInfo,
+    create_thumbnail,
+    guess_download_name,
+    inspect_image,
+    thumbnail_extension,
+)
 
 
 @dataclass
@@ -19,6 +26,7 @@ class StoredAsset:
 
     asset: AssetRecord
     variants: List[VariantRecord]
+    created_paths: List[str]
 
 
 def sha256_file(path: Path) -> str:
@@ -48,38 +56,81 @@ def _storage_path(root: Path, sha256: str, filename: str) -> Path:
 
 
 def ensure_storage_roots(settings: Settings) -> None:
-    # 서버 시작 시 원본/파생 이미지 루트가 없으면 생성한다.
+    # 공유폴더가 끊긴 상태에서 로컬 디스크에 같은 경로를 만드는 사고를 막는다.
+    if settings.require_storage_mount and _mounted_ancestor(settings.storage_root) is None:
+        raise RuntimeError(f"Storage root is not on a mounted volume: {settings.storage_root}")
+
     settings.original_root.mkdir(parents=True, exist_ok=True)
     settings.variants_root.mkdir(parents=True, exist_ok=True)
+    # 디렉터리가 이미 있어도 실제 쓰기 권한이 없는 경우 시작 단계에서 실패시킨다.
+    with NamedTemporaryFile(prefix=".write-check-", dir=settings.storage_root):
+        pass
 
 
-def stage_upload(file_obj, original_filename: str, max_bytes: int) -> tuple[Path, int]:
+def _mounted_ancestor(path: Path) -> Path | None:
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+    while True:
+        if candidate.is_mount():
+            # 루트 파일시스템은 공유 저장소가 연결되었다는 증거가 아니다.
+            return None if candidate == Path(candidate.anchor) else candidate
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+
+def stage_upload(file_obj, _original_filename: str, max_bytes: int) -> tuple[Path, int]:
     # 업로드는 먼저 임시 파일에 받고, 크기 제한을 넘으면 즉시 중단한다.
     total = 0
-    suffix = Path(original_filename).suffix or ".upload"
-    with NamedTemporaryFile(prefix="upload-", suffix=suffix, delete=False) as temp_file:
-        while True:
-            chunk = file_obj.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"Upload exceeds max size of {max_bytes} bytes")
-            temp_file.write(chunk)
-        return Path(temp_file.name), total
+    temp_path = None
+    try:
+        # 사용자 파일명은 임시 경로에 사용하지 않고 실제 내용 검사 후 메타데이터로만 보관한다.
+        with NamedTemporaryFile(prefix="upload-", suffix=".upload", delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+            while True:
+                chunk = file_obj.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise UploadTooLargeError(f"Upload exceeds max size of {max_bytes} bytes")
+                temp_file.write(chunk)
+            return temp_path, total
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
-def finalize_store(temp_path: Path, destination: Path) -> None:
+def finalize_store(temp_path: Path, destination: Path) -> bool:
     # 최종 경로에는 원자적 rename으로만 올려 반쯤 쓴 파일 노출을 막는다.
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         # 동일 해시 파일이 이미 있으면 새 임시 파일은 버린다.
         temp_path.unlink(missing_ok=True)
-        return
+        return False
 
-    temp_destination = destination.with_suffix(destination.suffix + ".tmp")
-    shutil.move(str(temp_path), str(temp_destination))
-    os.replace(temp_destination, destination)
+    with NamedTemporaryFile(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+        delete=False,
+    ) as temp_file:
+        temp_destination = Path(temp_file.name)
+    try:
+        # 시스템 임시 폴더와 SMB 공유폴더는 파일시스템이 다를 수 있어 move를 사용한다.
+        shutil.move(str(temp_path), str(temp_destination))
+        os.replace(temp_destination, destination)
+        return True
+    except Exception:
+        temp_destination.unlink(missing_ok=True)
+        raise
 
 
 def build_asset_record(
@@ -87,39 +138,54 @@ def build_asset_record(
     original_filename: str,
     temp_path: Path,
     byte_size: int,
+    content_sha256: str | None = None,
 ) -> StoredAsset:
     # 원본 검사 -> 해시 계산 -> 최종 저장 -> 파생 이미지 생성 순서로 진행한다.
-    image_info = inspect_image(temp_path)
-    safe_name = guess_download_name(original_filename, image_info.file_ext)
-    sha256 = sha256_file(temp_path)
-    original_filename_on_disk = f"{sha256}{image_info.file_ext}"
-    original_path = _storage_path(settings.original_root, sha256, original_filename_on_disk)
-    finalize_store(temp_path, original_path)
+    created_paths: List[str] = []
+    try:
+        image_info = inspect_image(
+            temp_path,
+            settings.command_timeout_seconds,
+            settings.max_image_pixels,
+        )
+        if image_info.width * image_info.height > settings.max_image_pixels:
+            raise ValueError(f"Image exceeds max pixel count of {settings.max_image_pixels}")
+        safe_name = guess_download_name(original_filename, image_info.file_ext)
+        sha256 = content_sha256 or sha256_file(temp_path)
+        original_filename_on_disk = f"{sha256}{image_info.file_ext}"
+        original_path = _storage_path(settings.original_root, sha256, original_filename_on_disk)
+        if finalize_store(temp_path, original_path):
+            created_paths.append(str(original_path))
 
-    asset = AssetRecord(
-        sha256=sha256,
-        original_filename=safe_name,
-        content_type=image_info.content_type,
-        file_ext=image_info.file_ext,
-        byte_size=byte_size,
-        width=image_info.width,
-        height=image_info.height,
-        storage_path=str(original_path),
-        public_url=_public_url(settings, "original", sha256, original_filename_on_disk),
-    )
+        asset = AssetRecord(
+            sha256=sha256,
+            original_filename=safe_name,
+            content_type=image_info.content_type,
+            file_ext=image_info.file_ext,
+            byte_size=byte_size,
+            width=image_info.width,
+            height=image_info.height,
+            storage_path=str(original_path),
+            public_url=_public_url(settings, "original", sha256, original_filename_on_disk),
+        )
 
-    variants: List[VariantRecord] = []
-    if settings.enable_thumbnails:
-        # 썸네일은 고정된 폭 목록만 생성한다.
-        variants.extend(generate_variants(settings, asset, image_info))
+        variants: List[VariantRecord] = []
+        if settings.enable_thumbnails:
+            # 썸네일은 고정된 폭 목록만 생성한다.
+            variants.extend(generate_variants(settings, asset, image_info, created_paths))
 
-    return StoredAsset(asset=asset, variants=variants)
+        return StoredAsset(asset=asset, variants=variants, created_paths=created_paths)
+    except Exception:
+        # 레코드를 반환하기 전 실패해도 이번 요청이 새로 만든 파일은 남기지 않는다.
+        delete_files(reversed(created_paths))
+        raise
 
 
 def generate_variants(
     settings: Settings,
     asset: AssetRecord,
     image_info: ImageInfo,
+    created_paths: List[str],
 ) -> Iterable[VariantRecord]:
     # 원본보다 큰 썸네일은 만들지 않고, 이미 있으면 재사용한다.
     source_path = Path(asset.storage_path)
@@ -130,10 +196,22 @@ def generate_variants(
         filename = f"{asset.sha256}__thumb_{width}{ext}"
         output_path = _storage_path(settings.variants_root, asset.sha256, filename)
         if not output_path.exists():
-            variant_info = create_thumbnail(source_path, output_path, width, settings.thumbnail_format)
+            variant_info = _create_variant_atomically(
+                source_path,
+                output_path,
+                width,
+                settings.thumbnail_format,
+                settings.command_timeout_seconds,
+                settings.max_image_pixels,
+            )
+            created_paths.append(str(output_path))
         else:
             # 같은 파생 이미지가 이미 존재하면 메타데이터만 다시 읽는다.
-            variant_info = inspect_image(output_path)
+            variant_info = inspect_image(
+                output_path,
+                settings.command_timeout_seconds,
+                settings.max_image_pixels,
+            )
         yield VariantRecord(
             kind=f"thumb_{width}",
             format=settings.thumbnail_format,
@@ -145,9 +223,40 @@ def generate_variants(
         )
 
 
+def _create_variant_atomically(
+    source_path: Path,
+    output_path: Path,
+    width: int,
+    output_format: str,
+    timeout_seconds: int,
+    max_pixels: int,
+) -> ImageInfo:
+    # 인코딩 중 실패한 파일이 Nginx에 노출되지 않도록 같은 폴더의 임시 파일을 사용한다.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        prefix=f".{output_path.stem}.",
+        suffix=output_path.suffix,
+        dir=output_path.parent,
+        delete=False,
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+    try:
+        variant_info = create_thumbnail(
+            source_path,
+            temp_path,
+            width,
+            output_format,
+            timeout_seconds,
+            max_pixels,
+        )
+        os.replace(temp_path, output_path)
+        return variant_info
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def delete_files(paths: Iterable[str]) -> None:
     # 삭제 API에서는 DB와 파일시스템 정리를 함께 수행한다.
     for raw_path in paths:
-        path = Path(raw_path)
-        if path.exists():
-            path.unlink()
+        Path(raw_path).unlink(missing_ok=True)

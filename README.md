@@ -60,9 +60,10 @@
 
 1. 클라이언트가 `DELETE /assets/<sha256>`를 호출합니다.
 2. 업로드 서비스가 PostgreSQL에서 원본/썸네일 경로를 조회합니다.
-3. 썸네일 파일을 먼저 제거합니다.
-4. 원본 파일을 제거합니다.
-5. DB 상태를 `deleted`로 바꾸고 삭제 시각을 기록합니다.
+3. DB 상태를 `deleting`으로 바꿔 중간 실패 시 재시도할 수 있게 합니다.
+4. 썸네일 파일을 먼저 제거합니다.
+5. 원본 파일을 제거합니다.
+6. DB 상태를 `deleted`로 바꾸고 삭제 시각을 기록합니다.
 
 이 구조 덕분에 Nginx는 파일 생명주기를 직접 관리하지 않아도 됩니다.
 
@@ -88,6 +89,7 @@
 
 - `python3`
 - `Pillow`
+- `python-multipart`
 - `psql`
 - macOS 기본 `sips`
 - macOS 기본 `file`
@@ -162,9 +164,10 @@ export PGDATABASE=postgres
 ```
 
 기존 DB에 잘못된 경로가 이미 저장되어 있다면 아래 스크립트로 한 번에 정리할 수 있습니다.
+이 명령은 프로젝트 `.env`를 읽으며, `DATABASE_URL` 또는 `PGDATABASE`로 대상을 명시해야 실행됩니다.
 
 ```bash
-OLD_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+OLD_STORAGE_ROOT="$HOME/mnt/gorani-images/image-store" \
 NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 ./scripts/fix-storage-root.sh
 ```
@@ -173,28 +176,46 @@ NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 
 예시 파일은 [.env.example](.env.example)에 있습니다.
 
+```bash
+cp .env.example .env
+```
+
+프로젝트 루트의 `.env`는 서비스 시작 시 자동으로 읽습니다. 같은 이름의 환경변수가 셸에 이미 설정되어 있으면 셸 값을 우선 사용합니다.
+복사 후 `IMAGE_API_KEYS`에는 반드시 직접 생성한 긴 임의 토큰을 입력하세요. 예시 파일은 안전을 위해 빈 값으로 둡니다.
+
 중요 환경변수:
 
 - `IMAGE_STORAGE_ROOT`: 실제 공유폴더 저장 루트
+- `IMAGE_REQUIRE_STORAGE_MOUNT`: 공유폴더 마운트 확인 여부. 운영 기본값은 `1`이며 로컬 저장소 개발 시에만 `0` 사용
 - `IMAGE_PUBLIC_PREFIX`: Nginx가 사용할 공개 URL prefix
 - `IMAGE_MAX_UPLOAD_BYTES`: 최대 업로드 크기
+- `IMAGE_MAX_IMAGE_PIXELS`: 디코딩할 이미지의 최대 픽셀 수. 기본값은 `40000000`
+- `IMAGE_MAX_WORKERS`: 동시에 처리할 HTTP 요청 수. 기본값은 `8`
+- `IMAGE_HTTP_TIMEOUT_SECONDS`: HTTP 헤더·본문 소켓 제한시간. 기본값은 `30`
+- `IMAGE_CLEANUP_BATCH_SIZE`: 백그라운드 파일 정리 1회 처리량. 기본값은 `10`
+- `IMAGE_COMMAND_TIMEOUT_SECONDS`: `file`, `sips`, Pillow 이미지 처리 제한시간. 기본값은 `30`
+- `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL 연결·잠금·쿼리 제한시간. 기본값은 `10`
 - `IMAGE_ENABLE_THUMBNAILS`: 썸네일 생성 여부
 - `IMAGE_THUMBNAIL_WIDTHS`: 생성할 썸네일 폭 목록
 - `IMAGE_THUMBNAIL_FORMAT`: `jpeg`, `png`, `webp`
 - `IMAGE_API_KEYS`: 업로드/삭제에 허용할 API 키 목록
 - `PGDATABASE` 또는 `DATABASE_URL`: PostgreSQL 접속 대상
 
+`DATABASE_URL`을 사용하면 서비스가 URL을 libpq 환경변수로 분해해 `psql` 명령행에 비밀번호를 노출하지 않습니다.
+
 공개 저장소 주의:
 - 실제 API 키, 비밀번호, 연결 문자열은 커밋하면 안 됩니다.
 - `.env` 파일은 `.gitignore`에 포함되어 있습니다.
 - `.env.example`에는 예시 값만 넣어두고, 실제 값은 로컬에서만 관리하세요.
+- `IMAGE_API_KEYS`가 비어 있으면 쓰기 API를 열지 않고 서비스 시작이 실패합니다.
+- 공유폴더가 마운트되지 않았거나 쓰기 권한이 없으면 서비스 시작이 실패합니다.
 
 ## 실행 방법
 
 ### 가장 간단한 실행
 
 ```bash
-cd /Users/m4_26/image.gorani.me
+cd image.gorani.me
 
 IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 IMAGE_THUMBNAIL_FORMAT=webp \
@@ -207,6 +228,12 @@ PGDATABASE=postgres \
 
 ```text
 Listening on http://127.0.0.1:8080
+```
+
+### 테스트 실행
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 ### 기본 포트 변경
@@ -369,8 +396,9 @@ Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](doc
 
 ## 현재 구현 제약
 
-- 이미지 검사와 썸네일 생성은 macOS `sips` 기반입니다.
-- 현재 환경에서는 `webp` 썸네일 출력보다 `jpeg`가 안전합니다.
+- MIME 타입과 기본 이미지 크기 검사는 `file`과 macOS `sips`를 사용합니다.
+- JPEG/PNG/TIFF/WebP의 EXIF 방향 검사와 기본 `webp` 썸네일 생성은 제한시간이 적용된 Pillow 자식 프로세스에서 수행합니다.
+- `jpeg` 또는 `png` 썸네일 포맷을 명시하면 `sips`로 생성합니다.
 - 읽기 API는 공개 상태이고, 쓰기 API만 API key로 보호합니다.
 - PostgreSQL 연결은 현재 Python 드라이버가 아니라 `psql` CLI를 사용합니다.
 

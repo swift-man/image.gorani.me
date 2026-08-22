@@ -1,24 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional
+from urllib.parse import parse_qs, unquote, urlsplit
 
-from .config import Settings
+from .config import PostgreSQLSettings, Settings
+from .errors import DatabaseTimeoutError
 
 
 def _sql_literal(value: object) -> str:
-    # psql CLI를 쓰는 구조라서 최소한의 문자열 이스케이프를 직접 처리한다.
+    # 문자열은 UTF-8 16진수로 인코딩해 SQL 구문 문자가 데이터 경계를 벗어나지 못하게 한다.
     if value is None:
         return "NULL"
     if isinstance(value, bool):
         return "TRUE" if value else "FALSE"
     if isinstance(value, int):
         return str(value)
-    text = str(value).replace("'", "''")
-    return "'" + text + "'"
+    encoded = str(value).encode("utf-8").hex()
+    return f"convert_from(decode('{encoded}', 'hex'), 'UTF8')"
 
 
 @dataclass
@@ -55,45 +58,241 @@ class AssetLookup:
 
     asset_id: int
     sha256: str
+    original_filename: str
+    content_type: str
+    file_ext: str
+    byte_size: int
+    width: int
+    height: int
     storage_path: str
     public_url: str
     status: str
     variants: List[VariantRecord]
 
 
+@dataclass
+class PendingFileDeletion:
+    """DB가 추적하며 재시도할 파생 파일 삭제 작업을 표현한다."""
+
+    deletion_id: int
+    storage_path: str
+    asset_sha256: str | None
+
+
 class Database:
     """psql CLI를 통해 PostgreSQL과 통신하는 얇은 저장소 계층."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings | PostgreSQLSettings) -> None:
         self.settings = settings
 
     def _psql_base_command(self) -> list[str]:
-        # DATABASE_URL 또는 PGDATABASE가 잡혀 있으면 그대로 사용한다.
+        # 비밀번호가 들어갈 수 있는 DATABASE_URL은 명령행 인자로 전달하지 않는다.
         command = ["psql", "-X", "-v", "ON_ERROR_STOP=1", "-At", "-F", "\t"]
-        if self.settings.pg_database:
+        if self.settings.pg_database and not self.settings.database_url:
             command.append(self.settings.pg_database)
         return command
 
+    def _psql_environment(self) -> dict[str, str]:
+        # 접속 URL을 libpq 환경변수로 분해해 프로세스 목록에 비밀번호가 노출되지 않게 한다.
+        environment = os.environ.copy()
+        environment.pop("DATABASE_URL", None)
+        if self.settings.database_url:
+            parsed = urlsplit(self.settings.database_url)
+            if parsed.hostname:
+                environment["PGHOST"] = parsed.hostname
+            if parsed.port:
+                environment["PGPORT"] = str(parsed.port)
+            if parsed.username:
+                environment["PGUSER"] = unquote(parsed.username)
+            if parsed.password:
+                environment["PGPASSWORD"] = unquote(parsed.password)
+            if parsed.path and parsed.path != "/":
+                environment["PGDATABASE"] = unquote(parsed.path.lstrip("/"))
+
+            option_names = {
+                "application_name": "PGAPPNAME",
+                "sslcert": "PGSSLCERT",
+                "sslkey": "PGSSLKEY",
+                "sslmode": "PGSSLMODE",
+                "sslrootcert": "PGSSLROOTCERT",
+            }
+            for name, values in parse_qs(parsed.query).items():
+                if name in option_names and values:
+                    environment[option_names[name]] = values[-1]
+
+        timeout_seconds = self.settings.db_timeout_seconds
+        environment["PGCONNECT_TIMEOUT"] = str(timeout_seconds)
+        timeout_options = (
+            f"-c statement_timeout={timeout_seconds * 1000} "
+            f"-c lock_timeout={timeout_seconds * 1000}"
+        )
+        existing_options = environment.get("PGOPTIONS", "").strip()
+        environment["PGOPTIONS"] = " ".join(
+            option for option in (existing_options, timeout_options) if option
+        )
+        return environment
+
     def run_sql(self, sql: str) -> str:
         # stdout만 반환해서 단순 조회/업데이트 공통 경로로 재사용한다.
-        completed = subprocess.run(
+        completed = self._run_psql(
             self._psql_base_command() + ["-c", sql],
-            check=True,
-            capture_output=True,
-            text=True,
+            "Database command",
         )
         return completed.stdout.strip()
 
+    def _run_psql(
+        self,
+        command: list[str],
+        operation_name: str,
+    ) -> subprocess.CompletedProcess:
+        try:
+            return subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=self._psql_environment(),
+                timeout=self.settings.db_timeout_seconds + 2,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise DatabaseTimeoutError(
+                f"{operation_name} exceeded {self.settings.db_timeout_seconds} seconds"
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").lower()
+            if "timeout" in stderr or "timed out" in stderr:
+                raise DatabaseTimeoutError(
+                    f"{operation_name} exceeded {self.settings.db_timeout_seconds} seconds"
+                ) from exc
+            raise
+
     def apply_schema(self, schema_path: Path) -> None:
         # 서버 시작 시 필요한 테이블이 없으면 자동 생성한다.
-        subprocess.run(
+        self._run_psql(
             self._psql_base_command() + ["-f", str(schema_path)],
-            check=True,
-            capture_output=True,
-            text=True,
+            "Database schema command",
         )
 
     def insert_asset(self, asset: AssetRecord, variants: Iterable[VariantRecord]) -> int:
+        # 원본과 모든 파생 메타데이터를 한 SQL 문으로 저장해 부분 커밋을 막는다.
+        variant_records = list(variants)
+        if variant_records:
+            variant_rows = ",\n        ".join(
+                "(" + ", ".join(
+                    [
+                        _sql_literal(variant.kind),
+                        _sql_literal(variant.format),
+                        _sql_literal(variant.width),
+                        _sql_literal(variant.height),
+                        _sql_literal(variant.byte_size),
+                        _sql_literal(variant.storage_path),
+                        _sql_literal(variant.public_url),
+                    ]
+                ) + ")"
+                for variant in variant_records
+            )
+            variant_source = f"""VALUES
+        {variant_rows}"""
+        else:
+            # 입력이 없어도 기존 활성 variant를 모두 정리할 수 있게 타입이 있는 빈 집합을 만든다.
+            variant_source = """SELECT
+        NULL::text,
+        NULL::text,
+        NULL::integer,
+        NULL::integer,
+        NULL::bigint,
+        NULL::text,
+        NULL::text
+    WHERE FALSE"""
+
+        variant_cte = f"""
+, variant_input (kind, format, width, height, byte_size, storage_path, public_url) AS (
+    {variant_source}
+), queued_variant_files AS (
+    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    SELECT
+        current_variant.storage_path,
+        inserted.sha256,
+        'variant_replaced'
+    FROM asset_variants current_variant
+    JOIN inserted ON inserted.id = current_variant.asset_id
+    JOIN variant_input ON variant_input.kind = current_variant.kind
+    WHERE current_variant.deleted_at IS NULL
+      AND current_variant.storage_path <> variant_input.storage_path
+    ON CONFLICT (storage_path) DO UPDATE
+    SET
+        asset_sha256 = EXCLUDED.asset_sha256,
+        reason = EXCLUDED.reason,
+        queued_at = NOW(),
+        completed_at = NULL
+    RETURNING id
+), queued_removed_variant_files AS (
+    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    SELECT
+        current_variant.storage_path,
+        inserted.sha256,
+        'variant_removed'
+    FROM asset_variants current_variant
+    JOIN inserted ON inserted.id = current_variant.asset_id
+    WHERE current_variant.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM variant_input
+          WHERE variant_input.kind = current_variant.kind
+      )
+    ON CONFLICT (storage_path) DO UPDATE
+    SET
+        asset_sha256 = EXCLUDED.asset_sha256,
+        reason = EXCLUDED.reason,
+        queued_at = NOW(),
+        completed_at = NULL
+    RETURNING id
+), retired_variants AS (
+    UPDATE asset_variants current_variant
+    SET deleted_at = NOW()
+    FROM inserted
+    WHERE current_variant.asset_id = inserted.id
+      AND current_variant.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM variant_input
+          WHERE variant_input.kind = current_variant.kind
+      )
+    RETURNING current_variant.id
+), upserted_variants AS (
+    INSERT INTO asset_variants (
+        asset_id, kind, format, width, height, byte_size, storage_path, public_url
+    )
+    SELECT
+        inserted.id,
+        variant_input.kind,
+        variant_input.format,
+        variant_input.width,
+        variant_input.height,
+        variant_input.byte_size,
+        variant_input.storage_path,
+        variant_input.public_url
+    FROM inserted
+    CROSS JOIN variant_input
+    ON CONFLICT (asset_id, kind) DO UPDATE
+    SET
+        format = EXCLUDED.format,
+        width = EXCLUDED.width,
+        height = EXCLUDED.height,
+        byte_size = EXCLUDED.byte_size,
+        storage_path = EXCLUDED.storage_path,
+        public_url = EXCLUDED.public_url,
+        deleted_at = NULL
+    RETURNING id
+)
+"""
+        variant_join = """
+CROSS JOIN (SELECT COUNT(*) FROM upserted_variants) committed_variants
+CROSS JOIN (SELECT COUNT(*) FROM queued_variant_files) queued_files
+CROSS JOIN (SELECT COUNT(*) FROM queued_removed_variant_files) queued_removed_files
+CROSS JOIN (SELECT COUNT(*) FROM retired_variants) retired_files
+""".strip()
+
         # 같은 해시가 다시 들어오면 기존 레코드를 active 상태로 되살린다.
         sql = f"""
 WITH inserted AS (
@@ -122,43 +321,15 @@ WITH inserted AS (
         public_url = EXCLUDED.public_url,
         status = 'active',
         deleted_at = NULL
-    RETURNING id
+    RETURNING id, sha256
 )
-SELECT id FROM inserted;
+{variant_cte}
+SELECT inserted.id
+FROM inserted
+{variant_join};
 """
         raw = self.run_sql(sql)
-        asset_id = int(raw.splitlines()[-1])
-        for variant in variants:
-            # 파생 이미지는 원본 ID를 받아 순차적으로 upsert 한다.
-            self.insert_variant(asset_id, variant)
-        return asset_id
-
-    def insert_variant(self, asset_id: int, variant: VariantRecord) -> None:
-        # 동일한 kind(예: thumb_160)는 덮어쓰기보다 upsert로 유지한다.
-        sql = f"""
-INSERT INTO asset_variants (
-    asset_id, kind, format, width, height, byte_size, storage_path, public_url
-) VALUES (
-    {_sql_literal(asset_id)},
-    {_sql_literal(variant.kind)},
-    {_sql_literal(variant.format)},
-    {_sql_literal(variant.width)},
-    {_sql_literal(variant.height)},
-    {_sql_literal(variant.byte_size)},
-    {_sql_literal(variant.storage_path)},
-    {_sql_literal(variant.public_url)}
-)
-ON CONFLICT (asset_id, kind) DO UPDATE
-SET
-    format = EXCLUDED.format,
-    width = EXCLUDED.width,
-    height = EXCLUDED.height,
-    byte_size = EXCLUDED.byte_size,
-    storage_path = EXCLUDED.storage_path,
-    public_url = EXCLUDED.public_url,
-    deleted_at = NULL;
-"""
-        self.run_sql(sql)
+        return int(raw.splitlines()[-1])
 
     def find_asset(self, sha256: str) -> Optional[AssetLookup]:
         # 조회용 JSON을 DB에서 조립해 오면 Python 쪽 매핑이 단순해진다.
@@ -166,6 +337,12 @@ SET
 SELECT json_build_object(
     'asset_id', a.id,
     'sha256', a.sha256,
+    'original_filename', a.original_filename,
+    'content_type', a.content_type,
+    'file_ext', a.file_ext,
+    'byte_size', a.byte_size,
+    'width', a.width,
+    'height', a.height,
     'storage_path', a.storage_path,
     'public_url', a.public_url,
     'status', a.status,
@@ -201,15 +378,104 @@ LIMIT 1;
         return AssetLookup(
             asset_id=payload["asset_id"],
             sha256=payload["sha256"],
+            original_filename=payload["original_filename"],
+            content_type=payload["content_type"],
+            file_ext=payload["file_ext"],
+            byte_size=payload["byte_size"],
+            width=payload["width"],
+            height=payload["height"],
             storage_path=payload["storage_path"],
             public_url=payload["public_url"],
             status=payload["status"],
             variants=variants,
         )
 
+    def find_pending_file_deletions(self, limit: int = 100) -> List[PendingFileDeletion]:
+        # 현재 활성 메타데이터가 참조하지 않는 경로만 반환해 포맷 재전환 경합을 피한다.
+        if limit <= 0:
+            raise ValueError("Pending deletion limit must be positive")
+        sql = f"""
+SELECT COALESCE(
+    json_agg(
+        json_build_object(
+            'deletion_id', pending.id,
+            'storage_path', pending.storage_path,
+            'asset_sha256', pending.asset_sha256
+        )
+        ORDER BY pending.id
+    ),
+    '[]'::json
+)
+FROM (
+    SELECT queue.id, queue.storage_path, queue.asset_sha256
+    FROM pending_file_deletions queue
+    WHERE queue.completed_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM assets asset
+          WHERE asset.storage_path = queue.storage_path
+            AND asset.status <> 'deleted'
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM asset_variants variant
+          WHERE variant.storage_path = queue.storage_path
+            AND variant.deleted_at IS NULL
+      )
+    ORDER BY queue.id
+    LIMIT {_sql_literal(limit)}
+) pending;
+"""
+        raw = self.run_sql(sql)
+        payload = json.loads(raw or "[]")
+        return [PendingFileDeletion(**item) for item in payload]
+
+    def is_file_deletion_ready(self, deletion_id: int) -> bool:
+        # 잠금을 얻은 뒤 현재 참조 여부를 다시 확인해 오래된 큐 조회 결과를 사용하지 않는다.
+        sql = f"""
+SELECT EXISTS (
+    SELECT 1
+    FROM pending_file_deletions queue
+    WHERE queue.id = {_sql_literal(deletion_id)}
+      AND queue.completed_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM assets asset
+          WHERE asset.storage_path = queue.storage_path
+            AND asset.status <> 'deleted'
+      )
+      AND NOT EXISTS (
+          SELECT 1
+          FROM asset_variants variant
+          WHERE variant.storage_path = queue.storage_path
+            AND variant.deleted_at IS NULL
+      )
+);
+"""
+        return self.run_sql(sql) == "t"
+
+    def mark_file_deletion_completed(self, deletion_id: int) -> None:
+        sql = f"""
+UPDATE pending_file_deletions
+SET completed_at = NOW()
+WHERE id = {_sql_literal(deletion_id)};
+"""
+        self.run_sql(sql)
+
+    def mark_deleting(self, sha256: str) -> None:
+        # 파일 작업 전에 중간 상태를 남겨 프로세스가 중단되어도 삭제를 재시도할 수 있게 한다.
+        sql = f"""
+UPDATE assets
+SET status = 'deleting'
+WHERE sha256 = {_sql_literal(sha256)}
+  AND status IN ('active', 'deleting');
+"""
+        self.run_sql(sql)
+
     def mark_deleted(self, sha256: str) -> None:
         # 파일 삭제 이후 DB 상태를 deleted로 바꾸고 deleted_at도 기록한다.
         sql = f"""
+BEGIN;
 UPDATE asset_variants
 SET deleted_at = NOW()
 WHERE asset_id = (SELECT id FROM assets WHERE sha256 = {_sql_literal(sha256)});
@@ -217,5 +483,6 @@ WHERE asset_id = (SELECT id FROM assets WHERE sha256 = {_sql_literal(sha256)});
 UPDATE assets
 SET status = 'deleted', deleted_at = NOW()
 WHERE sha256 = {_sql_literal(sha256)};
+COMMIT;
 """
         self.run_sql(sql)

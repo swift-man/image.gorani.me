@@ -31,7 +31,7 @@ Returns stored metadata and known variants.
 
 ### `DELETE /assets/<sha256>`
 
-Deletes managed variant files and the original file, then marks the asset deleted in PostgreSQL.
+Marks the asset as deleting, removes managed files, then marks it deleted in PostgreSQL.
 
 Example:
 
@@ -43,11 +43,19 @@ curl -X DELETE \
 
 ## Environment Variables
 
-See [.env.example](/Users/m4_26/image.gorani.me/.env.example).
+See [`.env.example`](../.env.example).
 
 Important values:
 - `IMAGE_STORAGE_ROOT`: mounted shared folder path
+- `IMAGE_REQUIRE_STORAGE_MOUNT`: require a non-root mounted volume before startup (`1` by default)
 - `IMAGE_PUBLIC_PREFIX`: public URL base expected by Nginx
+- `IMAGE_MAX_UPLOAD_BYTES`: maximum compressed upload bytes
+- `IMAGE_MAX_IMAGE_PIXELS`: maximum decoded image pixel count
+- `IMAGE_MAX_WORKERS`: maximum concurrent HTTP request workers
+- `IMAGE_HTTP_TIMEOUT_SECONDS`: accepted socket read timeout
+- `IMAGE_CLEANUP_BATCH_SIZE`: background file cleanup batch size
+- `IMAGE_COMMAND_TIMEOUT_SECONDS`: timeout for `file`, `sips`, and Pillow workers
+- `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL connection, lock, and query timeout
 - `IMAGE_ENABLE_THUMBNAILS`: `1` or `0`
 - `IMAGE_THUMBNAIL_WIDTHS`: comma-separated widths
 - `IMAGE_THUMBNAIL_FORMAT`: `jpeg`, `png`, or `webp`
@@ -83,24 +91,30 @@ IMAGE_API_KEYS='replace-me' \
 
 ## Database
 
-The app auto-applies [schema.sql](/Users/m4_26/image.gorani.me/sql/schema.sql) on startup.
+The app auto-applies [`schema.sql`](../sql/schema.sql) on startup.
 
 It currently talks to PostgreSQL via the `psql` CLI, which keeps the project dependency-light for now.
 
 If older rows were stored under the wrong macOS mount path, fix them with:
 
 ```bash
-OLD_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+OLD_STORAGE_ROOT=/Users/your-name/mnt/gorani-images/image-store \
 NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 ./scripts/fix-storage-root.sh
 ```
+
+The command loads the project `.env`, reuses the service database connection parser, and refuses to run unless `DATABASE_URL` or `PGDATABASE` explicitly selects a target database.
 
 ## Current Constraints
 
 - image inspection depends on macOS `sips`
 - WebP thumbnail generation uses Pillow because this machine cannot write WebP reliably with `sips`
-- supported input formats depend on what `sips`, `file`, and Pillow can read
+- supported input formats depend on what `sips`, `file`, and Pillow can read; thumbnail decoder failures return `400`
+- HTTP request workers are bounded by `IMAGE_MAX_WORKERS` and Pillow work runs in a timeout-controlled child process
+- accepted HTTP sockets time out according to `IMAGE_HTTP_TIMEOUT_SECONDS`
+- retired variant files are cleaned by one background worker in fixed-size batches
 - this version assumes the shared folder is already mounted before startup
+- startup fails if the configured shared folder is not mounted or writable
 - deletes are hard file deletes plus metadata soft-delete
 
 ## Recommended Next Steps

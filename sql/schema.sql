@@ -36,3 +36,20 @@ CREATE TABLE IF NOT EXISTS asset_variants (
 );
 
 CREATE INDEX IF NOT EXISTS idx_asset_variants_asset_id ON asset_variants (asset_id);
+
+-- 포맷 교체 등으로 더 이상 참조되지 않는 파일을 안전하게 재시도 삭제하기 위한 큐다.
+CREATE TABLE IF NOT EXISTS pending_file_deletions (
+    id BIGSERIAL PRIMARY KEY,
+    storage_path TEXT NOT NULL UNIQUE,
+    asset_sha256 CHAR(64),
+    reason TEXT NOT NULL,
+    queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+
+ALTER TABLE pending_file_deletions
+ADD COLUMN IF NOT EXISTS asset_sha256 CHAR(64);
+
+CREATE INDEX IF NOT EXISTS idx_pending_file_deletions_open
+ON pending_file_deletions (id)
+WHERE completed_at IS NULL;
