@@ -108,7 +108,8 @@ Avoid on-demand thumbnail generation in this service unless explicitly designed 
 ## Agent Response Rules
 
 - 코드가 변경되었다면 최종 응답에 재실행 명령어를 함께 안내한다.
-- 재실행 명령어는 현재 서비스 기준으로 `./scripts/run-service.sh`를 우선 안내하고, 필요한 환경변수가 있으면 같이 적는다.
+- LaunchAgent 설치 환경의 재실행 명령어는 `./scripts/restart-service.sh`를 우선 안내한다.
+- LaunchAgent를 설치하지 않은 개발 환경에서는 `./scripts/run-service.sh`를 안내하고, 필요한 환경변수가 있으면 같이 적는다.
 - 코드가 아닌 문서만 변경했다면 재실행이 필요 없다고 명확히 말한다.
 
 ## PR Review Rules

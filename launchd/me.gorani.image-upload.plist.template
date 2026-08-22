@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.gorani.image-upload</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__APP_EXECUTABLE__</string>
+    <string>__PROJECT_ROOT__/scripts/supervise-service.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__RUNTIME_PATH__</string>
+    <key>GORANI_SMB_HOST</key>
+    <string>__SMB_HOST__</string>
+    <key>GORANI_SMB_URL</key>
+    <string>__SMB_URL__</string>
+    <key>GORANI_SMB_MOUNT_POINT</key>
+    <string>__MOUNT_POINT__</string>
+    <key>IMAGE_STORAGE_ROOT</key>
+    <string>__STORAGE_ROOT__</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/gorani-image-upload/service.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/gorani-image-upload/service-error.log</string>
+</dict>
+</plist>

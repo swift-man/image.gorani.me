@@ -80,6 +80,39 @@ Prepare storage directories:
 IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store ./scripts/prepare-storage.sh
 ```
 
+## macOS Automatic Startup
+
+For the production upload Mac, connect to the share once in Finder and save the `ksj` credentials in macOS Keychain. No password is stored in this repository or in the LaunchAgent plist.
+
+This is a per-user LaunchAgent, so it starts after the `m4_26` user logs in to macOS, not before login. Finder and Keychain SMB access require that graphical login session.
+
+Install and immediately start the per-user LaunchAgent:
+
+```bash
+./scripts/install-launch-agent.sh
+```
+
+The installer also builds and ad-hoc signs `~/Applications/GoraniImageUpload.app`. This small native launcher gives macOS a stable application identity for Local Network and Network Volumes privacy controls. Approve both one-time access prompts after installation.
+
+The supervisor waits for `DESKTOP-0217PLD:445`, asks Finder to mount `smb://ksj@DESKTOP-0217PLD/gorani-images`, verifies the exact SMB mount, and then starts the upload service. If Windows or the network disconnects, it stops the service and retries until storage is available again.
+
+Operational commands:
+
+```bash
+./scripts/service-status.sh
+./scripts/restart-service.sh
+./scripts/uninstall-launch-agent.sh
+```
+
+Logs:
+
+```text
+~/Library/Logs/gorani-image-upload/service.log
+~/Library/Logs/gorani-image-upload/service-error.log
+```
+
+Do not run `.venv/bin/python -m upload_service` alongside the LaunchAgent. The managed service already owns port `8080`, so a second process will fail with `Address already in use`.
+
 ## Run
 
 ```bash
@@ -113,7 +146,7 @@ The command loads the project `.env`, reuses the service database connection par
 - HTTP request workers are bounded by `IMAGE_MAX_WORKERS` and Pillow work runs in a timeout-controlled child process
 - accepted HTTP sockets time out according to `IMAGE_HTTP_TIMEOUT_SECONDS`
 - retired variant files are cleaned by one background worker in fixed-size batches
-- this version assumes the shared folder is already mounted before startup
+- manual startup assumes the shared folder is already mounted; the optional macOS LaunchAgent performs mounting and retry automatically
 - startup fails if the configured shared folder is not mounted or writable
 - deletes are hard file deletes plus metadata soft-delete
 

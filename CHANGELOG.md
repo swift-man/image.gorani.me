@@ -4,6 +4,19 @@
 
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 참고하고, 버전 번호는 [Semantic Versioning](https://semver.org/lang/ko/) 흐름을 따릅니다.
 
+## [0.2.0] - 2026-08-23
+
+### Added
+
+- macOS 로그인 시 SMB 공유폴더와 업로드 서비스를 자동으로 준비하는 LaunchAgent 구성을 추가했습니다.
+- Windows SMB 서버가 늦게 시작되거나 연결이 끊긴 경우 서비스 중지, 재연결, 재시작을 반복하는 관리 스크립트를 추가했습니다.
+- LaunchAgent 설치, 제거, 상태 확인, 안전한 서비스 재시작 명령을 추가했습니다.
+- macOS 네트워크 볼륨 권한을 명확한 앱 ID로 요청하는 네이티브 런처를 추가했습니다.
+
+### Changed
+
+- LaunchAgent 운영 환경에서는 직접 중복 실행하지 않고 `scripts/restart-service.sh`로 재시작하도록 운영 절차를 변경했습니다.
+
 ## [0.1.0] - 2026-07-04
 
 ### Added

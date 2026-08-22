@@ -212,7 +212,61 @@ cp .env.example .env
 
 ## 실행 방법
 
-### 가장 간단한 실행
+### macOS 자동 실행 설정
+
+운영용 Mac에서는 직접 Python 프로세스를 반복 실행하지 않고 LaunchAgent가 SMB 연결과 서비스를 함께 관리하도록 설정하는 것을 권장합니다.
+
+LaunchAgent는 시스템 부팅 자체가 아니라 `m4_26` 사용자가 macOS에 로그인한 직후 시작됩니다. 키체인과 Finder SMB 연결이 사용자 세션에 속하므로 로그인 전에는 업로드 서비스가 실행되지 않습니다.
+
+최초 한 번 Finder에서 `이동 > 서버에 연결`을 열고 아래 주소로 접속합니다.
+
+```text
+smb://ksj@DESKTOP-0217PLD/gorani-images
+```
+
+비밀번호 입력 화면에서 키체인 저장을 선택해야 재부팅 후 비밀번호를 파일에 기록하지 않고 자동으로 연결할 수 있습니다. 그다음 LaunchAgent를 설치합니다.
+
+```bash
+./scripts/install-launch-agent.sh
+```
+
+설치 과정은 `~/Applications/GoraniImageUpload.app`도 생성합니다. 이 앱은 백그라운드 셸에 네트워크 권한을 무단 부여하지 않고 macOS가 권한 주체를 식별하도록 하는 작은 네이티브 런처입니다. 최초 실행 시 로컬 네트워크 및 네트워크 볼륨 접근 확인 창이 나타나면 모두 **허용**을 선택하세요.
+
+설치 스크립트는 현재 `psql` 위치도 감지해 LaunchAgent 전용 `PATH`에 기록합니다. 앱 런처 코드가 바뀌지 않은 재설치에서는 기존 앱 서명을 유지하므로 승인한 네트워크 권한도 유지됩니다.
+
+설치 후에는 다음 명령을 사용합니다.
+
+```bash
+# SMB, LaunchAgent, HTTP 상태 확인
+./scripts/service-status.sh
+
+# 설정 또는 코드 변경 후 안전하게 재시작
+./scripts/restart-service.sh
+
+# 자동 실행 제거
+./scripts/uninstall-launch-agent.sh
+```
+
+LaunchAgent는 다음 순서로 동작합니다.
+
+1. Windows의 `DESKTOP-0217PLD:445`가 열릴 때까지 기다립니다.
+2. Finder와 macOS 키체인으로 `gorani-images` 공유를 연결합니다.
+3. `/Volumes/gorani-images`가 실제 SMB 마운트인지 확인합니다.
+4. 업로드 서비스를 시작합니다.
+5. Windows 재부팅이나 네트워크 단절을 감지하면 서비스를 중지하고 연결 복구 후 다시 시작합니다.
+
+로그는 아래 파일에서 확인할 수 있습니다.
+
+```text
+~/Library/Logs/gorani-image-upload/service.log
+~/Library/Logs/gorani-image-upload/service-error.log
+```
+
+LaunchAgent가 설치된 상태에서 `.venv/bin/python -m upload_service`를 직접 실행하면 이미 실행 중인 서비스와 포트가 겹쳐 `Address already in use`가 발생합니다. 이때는 새 프로세스를 실행하지 말고 `./scripts/restart-service.sh`를 사용하세요.
+
+### 수동 실행
+
+LaunchAgent를 설치하지 않은 개발 환경에서만 사용합니다.
 
 ```bash
 cd image.gorani.me
