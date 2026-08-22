@@ -94,6 +94,58 @@ class Database:
         )
 
     def insert_asset(self, asset: AssetRecord, variants: Iterable[VariantRecord]) -> int:
+        # 원본과 모든 파생 메타데이터를 한 SQL 문으로 저장해 부분 커밋을 막는다.
+        variant_records = list(variants)
+        variant_cte = ""
+        variant_join = ""
+        if variant_records:
+            variant_rows = ",\n        ".join(
+                "(" + ", ".join(
+                    [
+                        _sql_literal(variant.kind),
+                        _sql_literal(variant.format),
+                        _sql_literal(variant.width),
+                        _sql_literal(variant.height),
+                        _sql_literal(variant.byte_size),
+                        _sql_literal(variant.storage_path),
+                        _sql_literal(variant.public_url),
+                    ]
+                ) + ")"
+                for variant in variant_records
+            )
+            variant_cte = f"""
+, variant_input (kind, format, width, height, byte_size, storage_path, public_url) AS (
+    VALUES
+        {variant_rows}
+), upserted_variants AS (
+    INSERT INTO asset_variants (
+        asset_id, kind, format, width, height, byte_size, storage_path, public_url
+    )
+    SELECT
+        inserted.id,
+        variant_input.kind,
+        variant_input.format,
+        variant_input.width,
+        variant_input.height,
+        variant_input.byte_size,
+        variant_input.storage_path,
+        variant_input.public_url
+    FROM inserted
+    CROSS JOIN variant_input
+    ON CONFLICT (asset_id, kind) DO UPDATE
+    SET
+        format = EXCLUDED.format,
+        width = EXCLUDED.width,
+        height = EXCLUDED.height,
+        byte_size = EXCLUDED.byte_size,
+        storage_path = EXCLUDED.storage_path,
+        public_url = EXCLUDED.public_url,
+        deleted_at = NULL
+    RETURNING id
+)
+"""
+            variant_join = "CROSS JOIN (SELECT COUNT(*) FROM upserted_variants) committed_variants"
+
         # 같은 해시가 다시 들어오면 기존 레코드를 active 상태로 되살린다.
         sql = f"""
 WITH inserted AS (
@@ -124,41 +176,13 @@ WITH inserted AS (
         deleted_at = NULL
     RETURNING id
 )
-SELECT id FROM inserted;
+{variant_cte}
+SELECT inserted.id
+FROM inserted
+{variant_join};
 """
         raw = self.run_sql(sql)
-        asset_id = int(raw.splitlines()[-1])
-        for variant in variants:
-            # 파생 이미지는 원본 ID를 받아 순차적으로 upsert 한다.
-            self.insert_variant(asset_id, variant)
-        return asset_id
-
-    def insert_variant(self, asset_id: int, variant: VariantRecord) -> None:
-        # 동일한 kind(예: thumb_160)는 덮어쓰기보다 upsert로 유지한다.
-        sql = f"""
-INSERT INTO asset_variants (
-    asset_id, kind, format, width, height, byte_size, storage_path, public_url
-) VALUES (
-    {_sql_literal(asset_id)},
-    {_sql_literal(variant.kind)},
-    {_sql_literal(variant.format)},
-    {_sql_literal(variant.width)},
-    {_sql_literal(variant.height)},
-    {_sql_literal(variant.byte_size)},
-    {_sql_literal(variant.storage_path)},
-    {_sql_literal(variant.public_url)}
-)
-ON CONFLICT (asset_id, kind) DO UPDATE
-SET
-    format = EXCLUDED.format,
-    width = EXCLUDED.width,
-    height = EXCLUDED.height,
-    byte_size = EXCLUDED.byte_size,
-    storage_path = EXCLUDED.storage_path,
-    public_url = EXCLUDED.public_url,
-    deleted_at = NULL;
-"""
-        self.run_sql(sql)
+        return int(raw.splitlines()[-1])
 
     def find_asset(self, sha256: str) -> Optional[AssetLookup]:
         # 조회용 JSON을 DB에서 조립해 오면 Python 쪽 매핑이 단순해진다.
@@ -210,6 +234,7 @@ LIMIT 1;
     def mark_deleted(self, sha256: str) -> None:
         # 파일 삭제 이후 DB 상태를 deleted로 바꾸고 deleted_at도 기록한다.
         sql = f"""
+BEGIN;
 UPDATE asset_variants
 SET deleted_at = NOW()
 WHERE asset_id = (SELECT id FROM assets WHERE sha256 = {_sql_literal(sha256)});
@@ -217,5 +242,6 @@ WHERE asset_id = (SELECT id FROM assets WHERE sha256 = {_sql_literal(sha256)});
 UPDATE assets
 SET status = 'deleted', deleted_at = NOW()
 WHERE sha256 = {_sql_literal(sha256)};
+COMMIT;
 """
         self.run_sql(sql)

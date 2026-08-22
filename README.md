@@ -88,6 +88,7 @@
 
 - `python3`
 - `Pillow`
+- `python-multipart`
 - `psql`
 - macOS 기본 `sips`
 - macOS 기본 `file`

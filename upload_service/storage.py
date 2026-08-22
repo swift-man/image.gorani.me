@@ -19,6 +19,7 @@ class StoredAsset:
 
     asset: AssetRecord
     variants: List[VariantRecord]
+    created_paths: List[str]
 
 
 def sha256_file(path: Path) -> str:
@@ -100,17 +101,29 @@ def stage_upload(file_obj, original_filename: str, max_bytes: int) -> tuple[Path
         raise
 
 
-def finalize_store(temp_path: Path, destination: Path) -> None:
+def finalize_store(temp_path: Path, destination: Path) -> bool:
     # 최종 경로에는 원자적 rename으로만 올려 반쯤 쓴 파일 노출을 막는다.
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         # 동일 해시 파일이 이미 있으면 새 임시 파일은 버린다.
         temp_path.unlink(missing_ok=True)
-        return
+        return False
 
-    temp_destination = destination.with_suffix(destination.suffix + ".tmp")
-    shutil.move(str(temp_path), str(temp_destination))
-    os.replace(temp_destination, destination)
+    with NamedTemporaryFile(
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        dir=destination.parent,
+        delete=False,
+    ) as temp_file:
+        temp_destination = Path(temp_file.name)
+    try:
+        # 시스템 임시 폴더와 SMB 공유폴더는 파일시스템이 다를 수 있어 move를 사용한다.
+        shutil.move(str(temp_path), str(temp_destination))
+        os.replace(temp_destination, destination)
+        return True
+    except Exception:
+        temp_destination.unlink(missing_ok=True)
+        raise
 
 
 def build_asset_record(
@@ -118,39 +131,48 @@ def build_asset_record(
     original_filename: str,
     temp_path: Path,
     byte_size: int,
+    content_sha256: str | None = None,
 ) -> StoredAsset:
     # 원본 검사 -> 해시 계산 -> 최종 저장 -> 파생 이미지 생성 순서로 진행한다.
-    image_info = inspect_image(temp_path)
-    safe_name = guess_download_name(original_filename, image_info.file_ext)
-    sha256 = sha256_file(temp_path)
-    original_filename_on_disk = f"{sha256}{image_info.file_ext}"
-    original_path = _storage_path(settings.original_root, sha256, original_filename_on_disk)
-    finalize_store(temp_path, original_path)
+    created_paths: List[str] = []
+    try:
+        image_info = inspect_image(temp_path)
+        safe_name = guess_download_name(original_filename, image_info.file_ext)
+        sha256 = content_sha256 or sha256_file(temp_path)
+        original_filename_on_disk = f"{sha256}{image_info.file_ext}"
+        original_path = _storage_path(settings.original_root, sha256, original_filename_on_disk)
+        if finalize_store(temp_path, original_path):
+            created_paths.append(str(original_path))
 
-    asset = AssetRecord(
-        sha256=sha256,
-        original_filename=safe_name,
-        content_type=image_info.content_type,
-        file_ext=image_info.file_ext,
-        byte_size=byte_size,
-        width=image_info.width,
-        height=image_info.height,
-        storage_path=str(original_path),
-        public_url=_public_url(settings, "original", sha256, original_filename_on_disk),
-    )
+        asset = AssetRecord(
+            sha256=sha256,
+            original_filename=safe_name,
+            content_type=image_info.content_type,
+            file_ext=image_info.file_ext,
+            byte_size=byte_size,
+            width=image_info.width,
+            height=image_info.height,
+            storage_path=str(original_path),
+            public_url=_public_url(settings, "original", sha256, original_filename_on_disk),
+        )
 
-    variants: List[VariantRecord] = []
-    if settings.enable_thumbnails:
-        # 썸네일은 고정된 폭 목록만 생성한다.
-        variants.extend(generate_variants(settings, asset, image_info))
+        variants: List[VariantRecord] = []
+        if settings.enable_thumbnails:
+            # 썸네일은 고정된 폭 목록만 생성한다.
+            variants.extend(generate_variants(settings, asset, image_info, created_paths))
 
-    return StoredAsset(asset=asset, variants=variants)
+        return StoredAsset(asset=asset, variants=variants, created_paths=created_paths)
+    except Exception:
+        # 레코드를 반환하기 전 실패해도 이번 요청이 새로 만든 파일은 남기지 않는다.
+        delete_files(reversed(created_paths))
+        raise
 
 
 def generate_variants(
     settings: Settings,
     asset: AssetRecord,
     image_info: ImageInfo,
+    created_paths: List[str],
 ) -> Iterable[VariantRecord]:
     # 원본보다 큰 썸네일은 만들지 않고, 이미 있으면 재사용한다.
     source_path = Path(asset.storage_path)
@@ -161,7 +183,13 @@ def generate_variants(
         filename = f"{asset.sha256}__thumb_{width}{ext}"
         output_path = _storage_path(settings.variants_root, asset.sha256, filename)
         if not output_path.exists():
-            variant_info = create_thumbnail(source_path, output_path, width, settings.thumbnail_format)
+            variant_info = _create_variant_atomically(
+                source_path,
+                output_path,
+                width,
+                settings.thumbnail_format,
+            )
+            created_paths.append(str(output_path))
         else:
             # 같은 파생 이미지가 이미 존재하면 메타데이터만 다시 읽는다.
             variant_info = inspect_image(output_path)
@@ -176,9 +204,31 @@ def generate_variants(
         )
 
 
+def _create_variant_atomically(
+    source_path: Path,
+    output_path: Path,
+    width: int,
+    output_format: str,
+) -> ImageInfo:
+    # 인코딩 중 실패한 파일이 Nginx에 노출되지 않도록 같은 폴더의 임시 파일을 사용한다.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(
+        prefix=f".{output_path.stem}.",
+        suffix=output_path.suffix,
+        dir=output_path.parent,
+        delete=False,
+    ) as temp_file:
+        temp_path = Path(temp_file.name)
+    try:
+        variant_info = create_thumbnail(source_path, temp_path, width, output_format)
+        os.replace(temp_path, output_path)
+        return variant_info
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
+
+
 def delete_files(paths: Iterable[str]) -> None:
     # 삭제 API에서는 DB와 파일시스템 정리를 함께 수행한다.
     for raw_path in paths:
-        path = Path(raw_path)
-        if path.exists():
-            path.unlink()
+        Path(raw_path).unlink(missing_ok=True)

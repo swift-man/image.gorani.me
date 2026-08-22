@@ -139,6 +139,24 @@ class LoadDotenvTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported boolean value"):
             config._parse_bool("tru", True)
 
+    def test_non_positive_upload_limit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+            environment = {
+                "IMAGE_API_KEYS": "test-key",
+                "IMAGE_MAX_UPLOAD_BYTES": "0",
+            }
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, "IMAGE_MAX_UPLOAD_BYTES"):
+                        config.load_settings()
+
+    def test_non_positive_thumbnail_width_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "IMAGE_THUMBNAIL_WIDTHS"):
+            config._parse_widths("160,0,320")
+
 
 if __name__ == "__main__":
     unittest.main()

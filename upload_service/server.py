@@ -1,16 +1,58 @@
 from __future__ import annotations
 
-import cgi
 import json
+import logging
+import threading
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 from urllib.parse import parse_qs, urlparse
+
+from python_multipart import parse_form
+from python_multipart.exceptions import FormParserError
+from python_multipart.multipart import File
 
 from .config import Settings, load_settings
 from .db import Database
-from .storage import build_asset_record, delete_files, ensure_storage_roots, stage_upload
+from .storage import (
+    StoredAsset,
+    build_asset_record,
+    delete_files,
+    ensure_storage_roots,
+    sha256_file,
+    stage_upload,
+)
+
+
+MAX_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+LOGGER = logging.getLogger(__name__)
+
+
+class _HashLockPool:
+    """같은 콘텐츠 해시의 저장과 DB 반영을 한 프로세스 안에서 직렬화한다."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+        self._users: dict[str, int] = {}
+
+    @contextmanager
+    def hold(self, key: str) -> Iterator[None]:
+        with self._guard:
+            lock = self._locks.setdefault(key, threading.Lock())
+            self._users[key] = self._users.get(key, 0) + 1
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            with self._guard:
+                self._users[key] -= 1
+                if self._users[key] == 0:
+                    del self._users[key]
+                    del self._locks[key]
 
 
 class UploadApplication:
@@ -19,6 +61,7 @@ class UploadApplication:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.db = Database(settings)
+        self._upload_locks = _HashLockPool()
 
     def ensure_ready(self) -> None:
         # 서버 시작 시 저장소 루트와 DB 스키마를 준비한다.
@@ -40,46 +83,101 @@ class UploadApplication:
 
         return False
 
+    def _persist_staged_upload(
+        self,
+        original_filename: str,
+        temp_path: Path,
+        byte_size: int,
+    ) -> tuple[StoredAsset, int]:
+        # 같은 해시의 동시 요청이 다른 요청의 롤백 파일을 재사용하지 못하게 묶는다.
+        content_sha256 = sha256_file(temp_path)
+        with self._upload_locks.hold(content_sha256):
+            stored = build_asset_record(
+                self.settings,
+                original_filename,
+                temp_path,
+                byte_size,
+                content_sha256=content_sha256,
+            )
+            try:
+                asset_id = self.db.insert_asset(stored.asset, stored.variants)
+            except Exception:
+                delete_files(reversed(stored.created_paths))
+                raise
+        return stored, asset_id
+
     def handle_upload(self, request: "UploadRequest") -> tuple[int, Dict[str, Any]]:
         # 업로드는 multipart/form-data만 허용한다.
         content_type = request.handler.headers.get("Content-Type", "")
         if not content_type.startswith("multipart/form-data"):
             return HTTPStatus.BAD_REQUEST, {"error": "Content-Type must be multipart/form-data"}
 
-        form = cgi.FieldStorage(
-            fp=request.handler.rfile,
-            headers=request.handler.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": content_type,
-            },
-        )
-        file_item = form["image"] if "image" in form else None
-        if file_item is None or not getattr(file_item, "file", None):
+        raw_content_length = request.handler.headers.get("Content-Length")
+        if raw_content_length is None:
+            return HTTPStatus.LENGTH_REQUIRED, {"error": "Content-Length is required"}
+        try:
+            content_length = int(raw_content_length)
+        except ValueError:
+            return HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length"}
+        if content_length < 0:
+            return HTTPStatus.BAD_REQUEST, {"error": "Invalid Content-Length"}
+        max_request_bytes = self.settings.max_upload_bytes + MAX_MULTIPART_OVERHEAD_BYTES
+        if content_length > max_request_bytes:
+            return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {
+                "error": f"Request exceeds max size of {max_request_bytes} bytes"
+            }
+
+        uploaded_files: list[File] = []
+        try:
+            parse_form(
+                {
+                    "Content-Type": content_type.encode("latin-1"),
+                    "Content-Length": str(content_length).encode("ascii"),
+                },
+                request.handler.rfile,
+                on_field=None,
+                on_file=uploaded_files.append,
+            )
+        except FormParserError:
+            for uploaded_file in uploaded_files:
+                uploaded_file.close()
+            return HTTPStatus.BAD_REQUEST, {"error": "Malformed multipart body"}
+        except Exception:
+            for uploaded_file in uploaded_files:
+                uploaded_file.close()
+            LOGGER.exception("Multipart parsing failed")
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error"}
+
+        image_files = [item for item in uploaded_files if item.field_name == b"image"]
+        if len(image_files) != 1:
+            for uploaded_file in uploaded_files:
+                uploaded_file.close()
             return HTTPStatus.BAD_REQUEST, {"error": "Missing form field: image"}
 
-        original_filename = file_item.filename or "upload"
+        file_item = image_files[0]
+        original_filename = (file_item.file_name or b"upload").decode("utf-8", errors="replace")
+        file_item.file_object.seek(0)
         temp_path = None
-        stored = None
         try:
             # 먼저 임시 파일로 받은 뒤, 검사와 저장을 진행한다.
-            temp_path, byte_size = stage_upload(file_item.file, original_filename, self.settings.max_upload_bytes)
-            stored = build_asset_record(self.settings, original_filename, temp_path, byte_size)
-            asset_id = self.db.insert_asset(stored.asset, stored.variants)
+            temp_path, byte_size = stage_upload(
+                file_item.file_object,
+                original_filename,
+                self.settings.max_upload_bytes,
+            )
+            stored, asset_id = self._persist_staged_upload(original_filename, temp_path, byte_size)
         except ValueError as exc:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
-            if stored is not None:
-                # 저장 중간에 실패하면 원본/썸네일을 최대한 롤백한다.
-                delete_files([variant.storage_path for variant in stored.variants] + [stored.asset.storage_path])
             return HTTPStatus.BAD_REQUEST, {"error": str(exc)}
         except Exception:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
-            if stored is not None:
-                # 예기치 못한 예외도 파일은 남기지 않도록 정리한다.
-                delete_files([variant.storage_path for variant in stored.variants] + [stored.asset.storage_path])
-            raise
+            LOGGER.exception("Upload failed")
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error"}
+        finally:
+            for uploaded_file in uploaded_files:
+                uploaded_file.close()
 
         return HTTPStatus.CREATED, {
             "id": asset_id,
@@ -105,33 +203,42 @@ class UploadApplication:
 
     def handle_delete(self, sha256: str) -> tuple[int, Dict[str, Any]]:
         # 삭제는 파일 제거 후 DB 상태를 deleted로 전환한다.
-        asset = self.db.find_asset(sha256)
-        if asset is None:
-            return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
+        try:
+            asset = self.db.find_asset(sha256)
+            if asset is None:
+                return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
 
-        delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
-        self.db.mark_deleted(sha256)
-        return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
+            delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
+            self.db.mark_deleted(sha256)
+            return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
+        except Exception:
+            # 파일 삭제는 missing_ok로 재시도 가능하므로 다음 DELETE 요청에서 복구할 수 있다.
+            LOGGER.exception("Delete failed for %s", sha256)
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error"}
 
     def handle_show(self, sha256: str) -> tuple[int, Dict[str, Any]]:
         # 조회는 공개 가능하므로 인증 없이 메타데이터만 반환한다.
-        asset = self.db.find_asset(sha256)
-        if asset is None:
-            return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
-        return HTTPStatus.OK, {
-            "sha256": asset.sha256,
-            "public_url": asset.public_url,
-            "status": asset.status,
-            "variants": [
-                {
-                    "kind": variant.kind,
-                    "url": variant.public_url,
-                    "width": variant.width,
-                    "height": variant.height,
-                }
-                for variant in asset.variants
-            ],
-        }
+        try:
+            asset = self.db.find_asset(sha256)
+            if asset is None:
+                return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
+            return HTTPStatus.OK, {
+                "sha256": asset.sha256,
+                "public_url": asset.public_url,
+                "status": asset.status,
+                "variants": [
+                    {
+                        "kind": variant.kind,
+                        "url": variant.public_url,
+                        "width": variant.width,
+                        "height": variant.height,
+                    }
+                    for variant in asset.variants
+                ],
+            }
+        except Exception:
+            LOGGER.exception("Asset lookup failed for %s", sha256)
+            return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error"}
 
 
 class UploadRequest:

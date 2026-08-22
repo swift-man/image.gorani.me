@@ -27,7 +27,10 @@ def _parse_widths(value: str) -> Tuple[int, ...]:
         item = item.strip()
         if not item:
             continue
-        widths.append(int(item))
+        width = int(item)
+        if width <= 0:
+            raise ValueError("IMAGE_THUMBNAIL_WIDTHS must contain only positive integers")
+        widths.append(width)
     return tuple(sorted(set(widths)))
 
 
@@ -110,6 +113,9 @@ def load_settings() -> Settings:
     api_keys = _parse_api_keys(os.getenv("IMAGE_API_KEYS"))
     if not api_keys:
         raise ValueError("IMAGE_API_KEYS must contain at least one API key")
+    max_upload_bytes = int(os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+    if max_upload_bytes <= 0:
+        raise ValueError("IMAGE_MAX_UPLOAD_BYTES must be a positive integer")
 
     return Settings(
         host=os.getenv("IMAGE_UPLOAD_HOST", "127.0.0.1"),
@@ -119,7 +125,7 @@ def load_settings() -> Settings:
         ).expanduser().resolve(),
         require_storage_mount=_parse_bool(os.getenv("IMAGE_REQUIRE_STORAGE_MOUNT"), True),
         public_prefix=public_prefix,
-        max_upload_bytes=int(os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))),
+        max_upload_bytes=max_upload_bytes,
         enable_thumbnails=_parse_bool(os.getenv("IMAGE_ENABLE_THUMBNAILS"), True),
         thumbnail_widths=_parse_widths(os.getenv("IMAGE_THUMBNAIL_WIDTHS", "160,320,640")),
         thumbnail_format=_parse_thumbnail_format(os.getenv("IMAGE_THUMBNAIL_FORMAT")),
