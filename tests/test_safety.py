@@ -154,35 +154,44 @@ class StorageSafetyTests(unittest.TestCase):
             finalize_store.assert_not_called()
 
     @unittest.skipUnless(shutil.which("sips"), "macOS sips is required")
-    def test_oriented_dimensions_drive_metadata_and_prevent_thumbnail_upscaling(self) -> None:
+    def test_exif_formats_drive_metadata_and_prevent_thumbnail_upscaling(self) -> None:
         from PIL import Image
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root / "store", require_storage_mount=False)
             settings = replace(settings, thumbnail_widths=(10, 30))
-            staged = root / "orientation-6.jpg"
-            image = Image.new("RGB", (40, 20), "red")
-            exif = Image.Exif()
-            exif[274] = 6
-            image.save(staged, format="JPEG", exif=exif)
-            image.close()
-            byte_size = staged.stat().st_size
-
-            stored = storage.build_asset_record(
-                settings,
-                "orientation-6.jpg",
-                staged,
-                byte_size,
+            supported_formats = (
+                ("JPEG", ".jpg"),
+                ("PNG", ".png"),
+                ("WEBP", ".webp"),
             )
+            for image_format, suffix in supported_formats:
+                with self.subTest(image_format=image_format):
+                    staged = root / f"orientation-6{suffix}"
+                    image = Image.new("RGB", (40, 20), "red")
+                    exif = Image.Exif()
+                    exif[274] = 6
+                    image.save(staged, format=image_format, exif=exif)
+                    image.close()
 
-            self.assertEqual((stored.asset.width, stored.asset.height), (20, 40))
-            self.assertEqual(len(stored.variants), 1)
-            self.assertEqual(stored.variants[0].kind, "thumb_10")
-            self.assertEqual(
-                (stored.variants[0].width, stored.variants[0].height),
-                (10, 20),
-            )
+                    stored = storage.build_asset_record(
+                        settings,
+                        staged.name,
+                        staged,
+                        staged.stat().st_size,
+                    )
+
+                    self.assertEqual(
+                        (stored.asset.width, stored.asset.height),
+                        (20, 40),
+                    )
+                    self.assertEqual(len(stored.variants), 1)
+                    self.assertEqual(stored.variants[0].kind, "thumb_10")
+                    self.assertEqual(
+                        (stored.variants[0].width, stored.variants[0].height),
+                        (10, 20),
+                    )
 
     def test_delete_files_is_idempotent_for_missing_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

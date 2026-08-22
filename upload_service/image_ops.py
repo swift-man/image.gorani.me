@@ -28,7 +28,13 @@ THUMBNAIL_FORMATS = {
     "webp": ".webp",
 }
 
-ORIENTATION_CONTENT_TYPES = {"image/jpeg", "image/tiff"}
+ORIENTATION_CONTENT_TYPES = {
+    # Pillow가 EXIF 방향을 읽고 썸네일에도 같은 보정을 적용할 수 있는 입력 형식이다.
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/webp",
+}
 
 
 @dataclass
@@ -255,7 +261,7 @@ def render_thumbnail_with_pillow(
                     raise InvalidImageError(
                         f"Image exceeds max pixel count of {max_pixels}"
                     )
-                # 휴대전화 JPEG의 EXIF 방향을 실제 픽셀에 반영한 뒤 메타데이터를 제거한다.
+                # 입력 형식과 무관하게 EXIF 방향을 실제 픽셀에 반영한 뒤 메타데이터를 제거한다.
                 oriented = ImageOps.exif_transpose(image)
                 try:
                     has_transparency = oriented.mode in {"RGBA", "LA"} or (
