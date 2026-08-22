@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -23,9 +24,18 @@ from upload_service.db import (
     VariantRecord,
     _sql_literal,
 )
-from upload_service.errors import DatabaseTimeoutError, ImageProcessingTimeoutError
+from upload_service.errors import (
+    DatabaseTimeoutError,
+    ImageProcessingTimeoutError,
+    InvalidImageError,
+)
 from upload_service.image_ops import ImageInfo
-from upload_service.server import MAX_MULTIPART_OVERHEAD_BYTES, UploadApplication
+from upload_service.server import (
+    MAX_MULTIPART_OVERHEAD_BYTES,
+    UploadApplication,
+    UploadHandler,
+    UploadHTTPServer,
+)
 from upload_service.storage import StoredAsset
 
 
@@ -38,6 +48,7 @@ def make_settings(storage_root: Path, *, require_storage_mount: bool) -> Setting
         public_prefix="/i",
         max_upload_bytes=20 * 1024 * 1024,
         max_image_pixels=40_000_000,
+        max_workers=8,
         command_timeout_seconds=30,
         db_timeout_seconds=10,
         enable_thumbnails=True,
@@ -381,6 +392,30 @@ class UploadSafetyTests(unittest.TestCase):
             self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
             self.assertEqual(payload, {"error": "Service temporarily unavailable"})
 
+    def test_invalid_decoder_input_returns_400_and_removes_staged_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+            staged = Path(temporary_directory) / "invalid.upload"
+            staged.write_bytes(b"not-an-image")
+
+            with patch(
+                "upload_service.server.stage_upload",
+                return_value=(staged, staged.stat().st_size),
+            ):
+                with patch.object(
+                    application,
+                    "_persist_staged_upload",
+                    side_effect=InvalidImageError("Unable to decode image"),
+                ):
+                    status, payload = application.handle_upload(
+                        _multipart_request(b"not-an-image")
+                    )
+
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertEqual(payload, {"error": "Unable to decode image"})
+            self.assertFalse(staged.exists())
+
     def test_pending_variant_file_cleanup_is_idempotently_retried(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -545,6 +580,120 @@ class ImageCommandSafetyTests(unittest.TestCase):
         self.assertNotIn("/", result)
         self.assertLessEqual(len(result), 200)
         self.assertTrue(result.endswith(".png"))
+
+    def test_sips_decode_failure_is_classified_as_invalid_image(self) -> None:
+        command_error = subprocess.CalledProcessError(1, ["sips"], stderr="invalid image")
+
+        with patch.object(image_ops, "detect_content_type", return_value="image/jpeg"):
+            with patch.object(image_ops, "_run_image_command", side_effect=command_error):
+                with self.assertRaises(InvalidImageError):
+                    image_ops.inspect_image(Path("broken.jpg"))
+
+    def test_file_identification_failure_is_classified_as_invalid_image(self) -> None:
+        command_error = subprocess.CalledProcessError(1, ["file"], stderr="invalid image")
+
+        with patch.object(image_ops, "_run_image_command", side_effect=command_error):
+            with self.assertRaises(InvalidImageError):
+                image_ops.inspect_image(Path("broken.jpg"))
+
+    def test_pillow_thumbnail_timeout_is_enforced_by_worker_process(self) -> None:
+        timeout = subprocess.TimeoutExpired(
+            ["python", "-m", "upload_service.pillow_worker"],
+            1,
+        )
+
+        with patch("upload_service.image_ops.subprocess.run", side_effect=timeout):
+            with self.assertRaises(ImageProcessingTimeoutError):
+                image_ops.create_thumbnail_with_pillow(
+                    Path("source.jpg"),
+                    Path("thumb.webp"),
+                    width=160,
+                    output_format="webp",
+                    timeout_seconds=1,
+                )
+
+    def test_pillow_thumbnail_applies_exif_orientation(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "oriented.jpg"
+            destination = Path(temporary_directory) / "thumb.webp"
+            image = Image.new("RGB", (40, 20), "red")
+            exif = Image.Exif()
+            exif[274] = 6
+            image.save(source, format="JPEG", exif=exif)
+            image.close()
+
+            image_ops.render_thumbnail_with_pillow(
+                source,
+                destination,
+                width=10,
+                output_format="webp",
+                max_pixels=1_000_000,
+            )
+
+            with Image.open(destination) as thumbnail:
+                self.assertEqual(thumbnail.size, (10, 20))
+
+    @unittest.skipUnless(shutil.which("sips"), "macOS sips is required")
+    def test_pillow_worker_process_creates_an_oriented_thumbnail(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "oriented.jpg"
+            destination = Path(temporary_directory) / "thumb.webp"
+            image = Image.new("RGB", (40, 20), "red")
+            exif = Image.Exif()
+            exif[274] = 6
+            image.save(source, format="JPEG", exif=exif)
+            image.close()
+
+            info = image_ops.create_thumbnail_with_pillow(
+                source,
+                destination,
+                width=10,
+                output_format="webp",
+                timeout_seconds=10,
+                max_pixels=1_000_000,
+            )
+
+            self.assertEqual((info.width, info.height), (10, 20))
+            self.assertTrue(destination.is_file())
+
+    def test_pillow_rejects_unsupported_decoder_input_as_invalid_image(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "unsupported.heic"
+            destination = Path(temporary_directory) / "thumb.webp"
+            source.write_bytes(b"unsupported-image-data")
+
+            with self.assertRaises(InvalidImageError):
+                image_ops.render_thumbnail_with_pillow(
+                    source,
+                    destination,
+                    width=10,
+                    output_format="webp",
+                    max_pixels=1_000_000,
+                )
+
+
+class ServerConcurrencySafetyTests(unittest.TestCase):
+    def test_http_server_has_bounded_worker_and_socket_queues(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+            server = UploadHTTPServer(
+                ("127.0.0.1", 0),
+                UploadHandler,
+                application,
+                max_workers=2,
+            )
+            try:
+                self.assertEqual(server.request_queue_size, 2)
+                self.assertTrue(server._worker_slots.acquire(blocking=False))
+                self.assertTrue(server._worker_slots.acquire(blocking=False))
+                self.assertFalse(server._worker_slots.acquire(blocking=False))
+            finally:
+                server.server_close()
 
 
 def _multipart_request(content: bytes):

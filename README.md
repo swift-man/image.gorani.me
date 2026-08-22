@@ -189,7 +189,8 @@ cp .env.example .env
 - `IMAGE_PUBLIC_PREFIX`: Nginx가 사용할 공개 URL prefix
 - `IMAGE_MAX_UPLOAD_BYTES`: 최대 업로드 크기
 - `IMAGE_MAX_IMAGE_PIXELS`: 디코딩할 이미지의 최대 픽셀 수. 기본값은 `40000000`
-- `IMAGE_COMMAND_TIMEOUT_SECONDS`: `file`, `sips` 이미지 명령 제한시간. 기본값은 `30`
+- `IMAGE_MAX_WORKERS`: 동시에 처리할 HTTP 요청 수. 기본값은 `8`
+- `IMAGE_COMMAND_TIMEOUT_SECONDS`: `file`, `sips`, Pillow 이미지 처리 제한시간. 기본값은 `30`
 - `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL 연결·잠금·쿼리 제한시간. 기본값은 `10`
 - `IMAGE_ENABLE_THUMBNAILS`: 썸네일 생성 여부
 - `IMAGE_THUMBNAIL_WIDTHS`: 생성할 썸네일 폭 목록

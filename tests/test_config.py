@@ -92,6 +92,7 @@ class LoadDotenvTests(unittest.TestCase):
                     )
                     self.assertEqual(settings.thumbnail_format, "webp")
                     self.assertEqual(settings.max_image_pixels, 40_000_000)
+                    self.assertEqual(settings.max_workers, 8)
                     self.assertEqual(settings.command_timeout_seconds, 30)
                     self.assertEqual(settings.db_timeout_seconds, 10)
                     self.assertIsNone(settings.database_url)
@@ -160,6 +161,20 @@ class LoadDotenvTests(unittest.TestCase):
     def test_non_positive_thumbnail_width_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "IMAGE_THUMBNAIL_WIDTHS"):
             config._parse_widths("160,0,320")
+
+    def test_non_positive_worker_limit_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+            environment = {
+                "IMAGE_API_KEYS": "test-key",
+                "IMAGE_MAX_WORKERS": "0",
+            }
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaisesRegex(ValueError, "IMAGE_MAX_WORKERS"):
+                        config.load_settings()
 
     def test_database_url_requires_postgresql_scheme(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

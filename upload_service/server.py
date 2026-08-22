@@ -380,11 +380,34 @@ class UploadHandler(BaseHTTPRequestHandler):
 
 
 class UploadHTTPServer(ThreadingHTTPServer):
-    """핸들러에서 app 객체를 접근할 수 있게 감싼 서버 래퍼."""
+    """동시 요청 수를 제한하고 핸들러에 app 객체를 제공하는 서버."""
 
-    def __init__(self, server_address, handler_cls, app: UploadApplication) -> None:
+    def __init__(
+        self,
+        server_address,
+        handler_cls,
+        app: UploadApplication,
+        max_workers: int,
+    ) -> None:
+        # accept 루프 자체에 역압력을 걸어 작업 대기 소켓도 무한히 쌓이지 않게 한다.
+        self._worker_slots = threading.BoundedSemaphore(max_workers)
+        self.request_queue_size = max_workers
         super().__init__(server_address, handler_cls)
         self.app = app
+
+    def process_request(self, request, client_address) -> None:
+        self._worker_slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._worker_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._worker_slots.release()
 
 
 def serve() -> None:
@@ -392,6 +415,11 @@ def serve() -> None:
     settings = load_settings()
     app = UploadApplication(settings)
     app.ensure_ready()
-    server = UploadHTTPServer((settings.host, settings.port), UploadHandler, app)
+    server = UploadHTTPServer(
+        (settings.host, settings.port),
+        UploadHandler,
+        app,
+        settings.max_workers,
+    )
     print(f"Listening on http://{settings.host}:{settings.port}")
     server.serve_forever()

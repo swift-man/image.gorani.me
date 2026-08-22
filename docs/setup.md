@@ -104,7 +104,8 @@ NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 
 - image inspection depends on macOS `sips`
 - WebP thumbnail generation uses Pillow because this machine cannot write WebP reliably with `sips`
-- supported input formats depend on what `sips`, `file`, and Pillow can read
+- supported input formats depend on what `sips`, `file`, and Pillow can read; thumbnail decoder failures return `400`
+- HTTP request workers are bounded by `IMAGE_MAX_WORKERS` and Pillow work runs in a timeout-controlled child process
 - this version assumes the shared folder is already mounted before startup
 - startup fails if the configured shared folder is not mounted or writable
 - deletes are hard file deletes plus metadata soft-delete

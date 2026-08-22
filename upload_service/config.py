@@ -98,6 +98,7 @@ class Settings:
     public_prefix: str
     max_upload_bytes: int
     max_image_pixels: int
+    max_workers: int
     command_timeout_seconds: int
     db_timeout_seconds: int
     enable_thumbnails: bool
@@ -132,6 +133,10 @@ def load_settings() -> Settings:
         "IMAGE_MAX_IMAGE_PIXELS",
         os.getenv("IMAGE_MAX_IMAGE_PIXELS", "40000000"),
     )
+    max_workers = _parse_positive_int(
+        "IMAGE_MAX_WORKERS",
+        os.getenv("IMAGE_MAX_WORKERS", "8"),
+    )
     command_timeout_seconds = _parse_positive_int(
         "IMAGE_COMMAND_TIMEOUT_SECONDS",
         os.getenv("IMAGE_COMMAND_TIMEOUT_SECONDS", "30"),
@@ -155,6 +160,7 @@ def load_settings() -> Settings:
         public_prefix=public_prefix,
         max_upload_bytes=max_upload_bytes,
         max_image_pixels=max_image_pixels,
+        max_workers=max_workers,
         command_timeout_seconds=command_timeout_seconds,
         db_timeout_seconds=db_timeout_seconds,
         enable_thumbnails=_parse_bool(os.getenv("IMAGE_ENABLE_THUMBNAILS"), True),

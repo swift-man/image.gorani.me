@@ -2,6 +2,10 @@ class UploadTooLargeError(ValueError):
     """업로드 이미지 바이트 수가 설정된 제한을 초과했음을 나타낸다."""
 
 
+class InvalidImageError(ValueError):
+    """입력 파일을 지원 이미지로 해석하거나 디코딩할 수 없음을 나타낸다."""
+
+
 class ServiceTimeoutError(RuntimeError):
     """외부 시스템 또는 명령 실행이 운영 제한시간을 초과했음을 나타낸다."""
 
