@@ -59,6 +59,13 @@ def _normalize_public_prefix(value: str) -> str:
     return "/" + normalized
 
 
+def _parse_positive_int(name: str, value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return parsed
+
+
 def _load_dotenv() -> None:
     # 프로젝트 루트의 .env를 읽어 셸에 아직 없는 변수만 채운다(셸 값이 우선).
     env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -90,10 +97,14 @@ class Settings:
     require_storage_mount: bool
     public_prefix: str
     max_upload_bytes: int
+    max_image_pixels: int
+    command_timeout_seconds: int
+    db_timeout_seconds: int
     enable_thumbnails: bool
     thumbnail_widths: Tuple[int, ...]
     thumbnail_format: str
     api_keys: FrozenSet[str]
+    database_url: str | None
     pg_database: str | None
 
     @property
@@ -113,9 +124,26 @@ def load_settings() -> Settings:
     api_keys = _parse_api_keys(os.getenv("IMAGE_API_KEYS"))
     if not api_keys:
         raise ValueError("IMAGE_API_KEYS must contain at least one API key")
-    max_upload_bytes = int(os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
-    if max_upload_bytes <= 0:
-        raise ValueError("IMAGE_MAX_UPLOAD_BYTES must be a positive integer")
+    max_upload_bytes = _parse_positive_int(
+        "IMAGE_MAX_UPLOAD_BYTES",
+        os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)),
+    )
+    max_image_pixels = _parse_positive_int(
+        "IMAGE_MAX_IMAGE_PIXELS",
+        os.getenv("IMAGE_MAX_IMAGE_PIXELS", "40000000"),
+    )
+    command_timeout_seconds = _parse_positive_int(
+        "IMAGE_COMMAND_TIMEOUT_SECONDS",
+        os.getenv("IMAGE_COMMAND_TIMEOUT_SECONDS", "30"),
+    )
+    db_timeout_seconds = _parse_positive_int(
+        "IMAGE_DB_TIMEOUT_SECONDS",
+        os.getenv("IMAGE_DB_TIMEOUT_SECONDS", "10"),
+    )
+    raw_database_url = os.getenv("DATABASE_URL")
+    database_url = raw_database_url.strip() if raw_database_url else None
+    if database_url and not database_url.startswith(("postgres://", "postgresql://")):
+        raise ValueError("DATABASE_URL must use the postgres:// or postgresql:// scheme")
 
     return Settings(
         host=os.getenv("IMAGE_UPLOAD_HOST", "127.0.0.1"),
@@ -126,9 +154,13 @@ def load_settings() -> Settings:
         require_storage_mount=_parse_bool(os.getenv("IMAGE_REQUIRE_STORAGE_MOUNT"), True),
         public_prefix=public_prefix,
         max_upload_bytes=max_upload_bytes,
+        max_image_pixels=max_image_pixels,
+        command_timeout_seconds=command_timeout_seconds,
+        db_timeout_seconds=db_timeout_seconds,
         enable_thumbnails=_parse_bool(os.getenv("IMAGE_ENABLE_THUMBNAILS"), True),
         thumbnail_widths=_parse_widths(os.getenv("IMAGE_THUMBNAIL_WIDTHS", "160,320,640")),
         thumbnail_format=_parse_thumbnail_format(os.getenv("IMAGE_THUMBNAIL_FORMAT")),
         api_keys=api_keys,
-        pg_database=os.getenv("DATABASE_URL") or os.getenv("PGDATABASE", "postgres"),
+        database_url=database_url,
+        pg_database=os.getenv("PGDATABASE", "postgres"),
     )

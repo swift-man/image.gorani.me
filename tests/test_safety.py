@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import tempfile
 import unittest
 from dataclasses import replace
@@ -12,8 +13,17 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from upload_service import storage
+from upload_service import image_ops
 from upload_service.config import Settings
-from upload_service.db import AssetRecord, AssetLookup, Database, VariantRecord
+from upload_service.db import (
+    AssetLookup,
+    AssetRecord,
+    Database,
+    PendingFileDeletion,
+    VariantRecord,
+    _sql_literal,
+)
+from upload_service.errors import DatabaseTimeoutError, ImageProcessingTimeoutError
 from upload_service.image_ops import ImageInfo
 from upload_service.server import MAX_MULTIPART_OVERHEAD_BYTES, UploadApplication
 from upload_service.storage import StoredAsset
@@ -27,10 +37,14 @@ def make_settings(storage_root: Path, *, require_storage_mount: bool) -> Setting
         require_storage_mount=require_storage_mount,
         public_prefix="/i",
         max_upload_bytes=20 * 1024 * 1024,
+        max_image_pixels=40_000_000,
+        command_timeout_seconds=30,
+        db_timeout_seconds=10,
         enable_thumbnails=True,
         thumbnail_widths=(160, 320, 640),
         thumbnail_format="webp",
         api_keys=frozenset({"test-key"}),
+        database_url=None,
         pg_database="postgres",
     )
 
@@ -91,7 +105,7 @@ class StorageSafetyTests(unittest.TestCase):
             image_info = ImageInfo("image/png", 800, 600, ".png")
             sha256 = "a" * 64
 
-            def fail_after_writing(_source, destination, _width, _format):
+            def fail_after_writing(_source, destination, _width, _format, _timeout, _pixels):
                 destination.write_bytes(b"partial")
                 raise RuntimeError("thumbnail failed")
 
@@ -107,6 +121,21 @@ class StorageSafetyTests(unittest.TestCase):
                 [path for path in settings.variants_root.rglob("*") if path.is_file()],
                 [],
             )
+
+    def test_pixel_limit_is_checked_before_final_storage(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            settings = replace(settings, max_image_pixels=100)
+            staged = Path(temporary_directory) / "staged.png"
+            staged.write_bytes(b"image")
+            image_info = ImageInfo("image/png", 11, 10, ".png")
+
+            with patch.object(storage, "inspect_image", return_value=image_info):
+                with patch.object(storage, "finalize_store") as finalize_store:
+                    with self.assertRaisesRegex(ValueError, "max pixel count"):
+                        storage.build_asset_record(settings, "photo.png", staged, 5)
+
+            finalize_store.assert_not_called()
 
     def test_delete_files_is_idempotent_for_missing_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -160,8 +189,9 @@ class UploadSafetyTests(unittest.TestCase):
 
             with patch("upload_service.server.build_asset_record", return_value=stored):
                 with patch.object(application.db, "insert_asset", side_effect=RuntimeError("db failed")):
-                    with patch("upload_service.server.LOGGER.exception"):
-                        status, payload = application.handle_upload(request)
+                    with patch.object(application.db, "find_asset", return_value=None):
+                        with patch("upload_service.server.LOGGER.exception"):
+                            status, payload = application.handle_upload(request)
 
             self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR)
             self.assertEqual(payload, {"error": "Internal server error"})
@@ -190,8 +220,9 @@ class UploadSafetyTests(unittest.TestCase):
 
             with patch("upload_service.server.build_asset_record", return_value=stored):
                 with patch.object(application.db, "insert_asset", side_effect=RuntimeError("db failed")):
-                    with patch("upload_service.server.LOGGER.exception"):
-                        status, _ = application.handle_upload(request)
+                    with patch.object(application.db, "find_asset", return_value=None):
+                        with patch("upload_service.server.LOGGER.exception"):
+                            status, _ = application.handle_upload(request)
 
             self.assertEqual(status, HTTPStatus.INTERNAL_SERVER_ERROR)
             self.assertFalse(created_path.exists())
@@ -226,6 +257,7 @@ class UploadSafetyTests(unittest.TestCase):
             application.db.find_asset = Mock(return_value=asset)
             application.db.mark_deleting = Mock()
             application.db.mark_deleted = Mock(side_effect=[RuntimeError("db failed"), None])
+            application.db.find_pending_file_deletions = Mock(return_value=[])
 
             with patch("upload_service.server.LOGGER.exception"):
                 first_status, _ = application.handle_delete(asset.sha256)
@@ -238,8 +270,163 @@ class UploadSafetyTests(unittest.TestCase):
             self.assertFalse(variant_path.exists())
             self.assertEqual(application.db.mark_deleting.call_count, 2)
 
+    def test_image_field_over_limit_returns_413(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            settings = replace(settings, max_upload_bytes=5)
+            application = UploadApplication(settings)
+
+            status, payload = application.handle_upload(_multipart_request(b"123456"))
+
+            self.assertEqual(status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self.assertIn("exceeds max size", payload["error"])
+
+    def test_ambiguous_database_success_preserves_files_and_returns_asset(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            application = UploadApplication(settings)
+            created_path = root / "created.png"
+            created_path.write_bytes(b"created")
+            asset = AssetRecord(
+                sha256="9" * 64,
+                original_filename="photo.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=5,
+                width=10,
+                height=10,
+                storage_path=str(created_path),
+                public_url="/i/original/99/99/photo.png",
+            )
+            stored = StoredAsset(asset=asset, variants=[], created_paths=[str(created_path)])
+            persisted = AssetLookup(
+                asset_id=99,
+                sha256=asset.sha256,
+                storage_path=asset.storage_path,
+                public_url=asset.public_url,
+                status="active",
+                variants=[],
+            )
+
+            with patch("upload_service.server.sha256_file", return_value=asset.sha256):
+                with patch("upload_service.server.build_asset_record", return_value=stored):
+                    with patch.object(
+                        application.db,
+                        "insert_asset",
+                        side_effect=RuntimeError("lost reply"),
+                    ):
+                        with patch.object(application.db, "find_asset", return_value=persisted):
+                            with patch.object(
+                                application.db,
+                                "find_pending_file_deletions",
+                                return_value=[],
+                            ):
+                                with patch("upload_service.server.LOGGER.warning"):
+                                    status, payload = application.handle_upload(
+                                        _multipart_request(b"image")
+                                    )
+
+            self.assertEqual(status, HTTPStatus.CREATED)
+            self.assertEqual(payload["id"], 99)
+            self.assertTrue(created_path.exists())
+
+    def test_unverifiable_database_result_preserves_files_for_reconciliation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            application = UploadApplication(settings)
+            created_path = root / "created.png"
+            created_path.write_bytes(b"created")
+            asset = AssetRecord(
+                sha256="6" * 64,
+                original_filename="photo.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=5,
+                width=10,
+                height=10,
+                storage_path=str(created_path),
+                public_url="/i/original/66/66/photo.png",
+            )
+            stored = StoredAsset(asset=asset, variants=[], created_paths=[str(created_path)])
+            timeout = DatabaseTimeoutError("database unavailable")
+
+            with patch("upload_service.server.sha256_file", return_value=asset.sha256):
+                with patch("upload_service.server.build_asset_record", return_value=stored):
+                    with patch.object(application.db, "insert_asset", side_effect=timeout):
+                        with patch.object(application.db, "find_asset", side_effect=timeout):
+                            with patch("upload_service.server.LOGGER.exception"):
+                                status, payload = application.handle_upload(
+                                    _multipart_request(b"image")
+                                )
+
+            self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+            self.assertEqual(payload, {"error": "Service temporarily unavailable"})
+            self.assertTrue(created_path.exists())
+
+    def test_image_command_timeout_returns_503(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            application = UploadApplication(settings)
+
+            with patch(
+                "upload_service.server.build_asset_record",
+                side_effect=ImageProcessingTimeoutError("sips timed out"),
+            ):
+                with patch("upload_service.server.LOGGER.exception"):
+                    status, payload = application.handle_upload(_multipart_request(b"image"))
+
+            self.assertEqual(status, HTTPStatus.SERVICE_UNAVAILABLE)
+            self.assertEqual(payload, {"error": "Service temporarily unavailable"})
+
+    def test_pending_variant_file_cleanup_is_idempotently_retried(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            application = UploadApplication(settings)
+            retired_path = root / "retired.jpg"
+            retired_path.write_bytes(b"retired")
+            pending = PendingFileDeletion(7, str(retired_path), "7" * 64)
+            application.db.find_pending_file_deletions = Mock(return_value=[pending])
+            application.db.is_file_deletion_ready = Mock(return_value=True)
+            application.db.mark_file_deletion_completed = Mock(
+                side_effect=[RuntimeError("db failed"), None]
+            )
+
+            with patch("upload_service.server.LOGGER.exception"):
+                application._cleanup_pending_files()
+                application._cleanup_pending_files()
+
+            self.assertFalse(retired_path.exists())
+            self.assertEqual(application.db.mark_file_deletion_completed.call_count, 2)
+
+    def test_pending_cleanup_rechecks_active_references_after_locking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            application = UploadApplication(settings)
+            current_path = root / "current.webp"
+            current_path.write_bytes(b"current")
+            pending = PendingFileDeletion(8, str(current_path), "8" * 64)
+            application.db.find_pending_file_deletions = Mock(return_value=[pending])
+            application.db.is_file_deletion_ready = Mock(return_value=False)
+            application.db.mark_file_deletion_completed = Mock()
+
+            application._cleanup_pending_files()
+
+            self.assertTrue(current_path.exists())
+            application.db.mark_file_deletion_completed.assert_not_called()
+
 
 class DatabaseSafetyTests(unittest.TestCase):
+    def test_sql_literal_encodes_untrusted_text_as_hex(self) -> None:
+        literal = _sql_literal("photo'); DROP TABLE assets;--.png")
+
+        self.assertNotIn("DROP TABLE", literal)
+        self.assertRegex(literal, r"^convert_from\(decode\('[0-9a-f]+'")
+
     def test_asset_and_variants_are_written_in_one_database_statement(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             settings = make_settings(Path(temporary_directory), require_storage_mount=False)
@@ -273,6 +460,7 @@ class DatabaseSafetyTests(unittest.TestCase):
             sql = run_sql.call_args.args[0]
             self.assertIn("upserted_variants", sql)
             self.assertIn("CROSS JOIN variant_input", sql)
+            self.assertIn("pending_file_deletions", sql)
 
     def test_delete_starts_with_a_recoverable_database_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -285,6 +473,78 @@ class DatabaseSafetyTests(unittest.TestCase):
             sql = run_sql.call_args.args[0]
             self.assertIn("status = 'deleting'", sql)
             self.assertIn("status IN ('active', 'deleting')", sql)
+
+    def test_database_url_secret_is_not_added_to_process_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            password = "unit-test-password"
+            database_url = "".join(
+                [
+                    "postgresql",
+                    "://",
+                    "image-user",
+                    ":",
+                    password,
+                    "@",
+                    "db.local:5433/images?sslmode=require",
+                ]
+            )
+            settings = replace(
+                settings,
+                database_url=database_url,
+            )
+            database = Database(settings)
+
+            command = database._psql_base_command()
+            environment = database._psql_environment()
+
+            self.assertNotIn(password, " ".join(command))
+            self.assertEqual(environment["PGPASSWORD"], password)
+            self.assertEqual(environment["PGDATABASE"], "images")
+            self.assertEqual(environment["PGSSLMODE"], "require")
+
+    def test_database_command_timeout_is_converted_to_service_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            database = Database(settings)
+
+            with patch(
+                "upload_service.db.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(["psql"], 1),
+            ):
+                with self.assertRaises(DatabaseTimeoutError):
+                    database.run_sql("SELECT 1")
+
+    def test_postgresql_statement_timeout_is_converted_to_service_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            database = Database(settings)
+            timeout_error = subprocess.CalledProcessError(
+                1,
+                ["psql"],
+                stderr="ERROR: canceling statement due to statement timeout",
+            )
+
+            with patch("upload_service.db.subprocess.run", side_effect=timeout_error):
+                with self.assertRaises(DatabaseTimeoutError):
+                    database.run_sql("SELECT pg_sleep(30)")
+
+
+class ImageCommandSafetyTests(unittest.TestCase):
+    def test_image_command_timeout_is_converted_to_service_timeout(self) -> None:
+        timeout = subprocess.TimeoutExpired(["file"], 1)
+        with patch("upload_service.image_ops.subprocess.run", side_effect=timeout):
+            with self.assertRaises(ImageProcessingTimeoutError):
+                image_ops.detect_content_type(Path("image.png"), timeout_seconds=1)
+
+    def test_download_filename_is_reduced_to_a_bounded_basename(self) -> None:
+        filename = "../private/" + ("a" * 500) + ".png"
+
+        result = image_ops.guess_download_name(filename, ".png")
+
+        self.assertNotIn("/", result)
+        self.assertLessEqual(len(result), 200)
+        self.assertTrue(result.endswith(".png"))
 
 
 def _multipart_request(content: bytes):

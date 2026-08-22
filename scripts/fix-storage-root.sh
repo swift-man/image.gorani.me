@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-old_root="${OLD_STORAGE_ROOT:-/Users/m4_26/mnt/gorani-images/image-store}"
+old_root="${OLD_STORAGE_ROOT:-${HOME}/mnt/gorani-images/image-store}"
 new_root="${NEW_STORAGE_ROOT:-/Volumes/gorani-images/image-store}"
 
 psql -X -v ON_ERROR_STOP=1 <<SQL

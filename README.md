@@ -166,7 +166,7 @@ export PGDATABASE=postgres
 기존 DB에 잘못된 경로가 이미 저장되어 있다면 아래 스크립트로 한 번에 정리할 수 있습니다.
 
 ```bash
-OLD_STORAGE_ROOT=/Users/m4_26/mnt/gorani-images/image-store \
+OLD_STORAGE_ROOT="$HOME/mnt/gorani-images/image-store" \
 NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 ./scripts/fix-storage-root.sh
 ```
@@ -188,11 +188,16 @@ cp .env.example .env
 - `IMAGE_REQUIRE_STORAGE_MOUNT`: 공유폴더 마운트 확인 여부. 운영 기본값은 `1`이며 로컬 저장소 개발 시에만 `0` 사용
 - `IMAGE_PUBLIC_PREFIX`: Nginx가 사용할 공개 URL prefix
 - `IMAGE_MAX_UPLOAD_BYTES`: 최대 업로드 크기
+- `IMAGE_MAX_IMAGE_PIXELS`: 디코딩할 이미지의 최대 픽셀 수. 기본값은 `40000000`
+- `IMAGE_COMMAND_TIMEOUT_SECONDS`: `file`, `sips` 이미지 명령 제한시간. 기본값은 `30`
+- `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL 연결·잠금·쿼리 제한시간. 기본값은 `10`
 - `IMAGE_ENABLE_THUMBNAILS`: 썸네일 생성 여부
 - `IMAGE_THUMBNAIL_WIDTHS`: 생성할 썸네일 폭 목록
 - `IMAGE_THUMBNAIL_FORMAT`: `jpeg`, `png`, `webp`
 - `IMAGE_API_KEYS`: 업로드/삭제에 허용할 API 키 목록
 - `PGDATABASE` 또는 `DATABASE_URL`: PostgreSQL 접속 대상
+
+`DATABASE_URL`을 사용하면 서비스가 URL을 libpq 환경변수로 분해해 `psql` 명령행에 비밀번호를 노출하지 않습니다.
 
 공개 저장소 주의:
 - 실제 API 키, 비밀번호, 연결 문자열은 커밋하면 안 됩니다.
@@ -206,7 +211,7 @@ cp .env.example .env
 ### 가장 간단한 실행
 
 ```bash
-cd /Users/m4_26/image.gorani.me
+cd image.gorani.me
 
 IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 IMAGE_THUMBNAIL_FORMAT=webp \

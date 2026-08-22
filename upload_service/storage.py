@@ -10,7 +10,14 @@ from typing import Iterable, List
 
 from .config import Settings
 from .db import AssetRecord, VariantRecord
-from .image_ops import ImageInfo, create_thumbnail, guess_download_name, inspect_image, thumbnail_extension
+from .errors import UploadTooLargeError
+from .image_ops import (
+    ImageInfo,
+    create_thumbnail,
+    guess_download_name,
+    inspect_image,
+    thumbnail_extension,
+)
 
 
 @dataclass
@@ -78,13 +85,13 @@ def _mounted_ancestor(path: Path) -> Path | None:
         candidate = parent
 
 
-def stage_upload(file_obj, original_filename: str, max_bytes: int) -> tuple[Path, int]:
+def stage_upload(file_obj, _original_filename: str, max_bytes: int) -> tuple[Path, int]:
     # 업로드는 먼저 임시 파일에 받고, 크기 제한을 넘으면 즉시 중단한다.
     total = 0
-    suffix = Path(original_filename).suffix or ".upload"
     temp_path = None
     try:
-        with NamedTemporaryFile(prefix="upload-", suffix=suffix, delete=False) as temp_file:
+        # 사용자 파일명은 임시 경로에 사용하지 않고 실제 내용 검사 후 메타데이터로만 보관한다.
+        with NamedTemporaryFile(prefix="upload-", suffix=".upload", delete=False) as temp_file:
             temp_path = Path(temp_file.name)
             while True:
                 chunk = file_obj.read(1024 * 1024)
@@ -92,7 +99,7 @@ def stage_upload(file_obj, original_filename: str, max_bytes: int) -> tuple[Path
                     break
                 total += len(chunk)
                 if total > max_bytes:
-                    raise ValueError(f"Upload exceeds max size of {max_bytes} bytes")
+                    raise UploadTooLargeError(f"Upload exceeds max size of {max_bytes} bytes")
                 temp_file.write(chunk)
             return temp_path, total
     except Exception:
@@ -136,7 +143,9 @@ def build_asset_record(
     # 원본 검사 -> 해시 계산 -> 최종 저장 -> 파생 이미지 생성 순서로 진행한다.
     created_paths: List[str] = []
     try:
-        image_info = inspect_image(temp_path)
+        image_info = inspect_image(temp_path, settings.command_timeout_seconds)
+        if image_info.width * image_info.height > settings.max_image_pixels:
+            raise ValueError(f"Image exceeds max pixel count of {settings.max_image_pixels}")
         safe_name = guess_download_name(original_filename, image_info.file_ext)
         sha256 = content_sha256 or sha256_file(temp_path)
         original_filename_on_disk = f"{sha256}{image_info.file_ext}"
@@ -188,11 +197,13 @@ def generate_variants(
                 output_path,
                 width,
                 settings.thumbnail_format,
+                settings.command_timeout_seconds,
+                settings.max_image_pixels,
             )
             created_paths.append(str(output_path))
         else:
             # 같은 파생 이미지가 이미 존재하면 메타데이터만 다시 읽는다.
-            variant_info = inspect_image(output_path)
+            variant_info = inspect_image(output_path, settings.command_timeout_seconds)
         yield VariantRecord(
             kind=f"thumb_{width}",
             format=settings.thumbnail_format,
@@ -209,6 +220,8 @@ def _create_variant_atomically(
     output_path: Path,
     width: int,
     output_format: str,
+    timeout_seconds: int,
+    max_pixels: int,
 ) -> ImageInfo:
     # 인코딩 중 실패한 파일이 Nginx에 노출되지 않도록 같은 폴더의 임시 파일을 사용한다.
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -220,7 +233,14 @@ def _create_variant_atomically(
     ) as temp_file:
         temp_path = Path(temp_file.name)
     try:
-        variant_info = create_thumbnail(source_path, temp_path, width, output_format)
+        variant_info = create_thumbnail(
+            source_path,
+            temp_path,
+            width,
+            output_format,
+            timeout_seconds,
+            max_pixels,
+        )
         os.replace(temp_path, output_path)
         return variant_info
     except Exception:

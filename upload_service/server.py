@@ -16,6 +16,7 @@ from python_multipart.multipart import File
 
 from .config import Settings, load_settings
 from .db import Database
+from .errors import ServiceTimeoutError, UploadTooLargeError
 from .storage import (
     StoredAsset,
     build_asset_record,
@@ -68,6 +69,7 @@ class UploadApplication:
         ensure_storage_roots(self.settings)
         schema_path = Path(__file__).resolve().parent.parent / "sql" / "schema.sql"
         self.db.apply_schema(schema_path)
+        self._cleanup_pending_files()
 
     def is_authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         # 읽기 API는 공개하고, 쓰기 API만 키 기반으로 보호한다.
@@ -101,10 +103,61 @@ class UploadApplication:
             )
             try:
                 asset_id = self.db.insert_asset(stored.asset, stored.variants)
-            except Exception:
-                delete_files(reversed(stored.created_paths))
-                raise
+            except Exception as database_error:
+                # 커밋 직후 연결이 끊긴 경우에는 재조회로 반영 여부를 먼저 확인한다.
+                try:
+                    persisted = self.db.find_asset(content_sha256)
+                except Exception:
+                    # 결과가 불명확하면 데이터 손실보다 고아 파일 보존을 우선한다.
+                    LOGGER.exception(
+                        "Unable to verify database result; preserving files for %s",
+                        content_sha256,
+                    )
+                    raise database_error
+                if self._asset_matches_stored(persisted, stored):
+                    LOGGER.warning(
+                        "Recovered an ambiguous database result for %s",
+                        content_sha256,
+                    )
+                    asset_id = persisted.asset_id
+                else:
+                    delete_files(reversed(stored.created_paths))
+                    raise
+        self._cleanup_pending_files()
         return stored, asset_id
+
+    @staticmethod
+    def _asset_matches_stored(persisted, stored: StoredAsset) -> bool:
+        if persisted is None or persisted.status != "active":
+            return False
+        if persisted.sha256 != stored.asset.sha256:
+            return False
+        if persisted.storage_path != stored.asset.storage_path:
+            return False
+        expected_variants = {variant.storage_path for variant in stored.variants}
+        persisted_variants = {variant.storage_path for variant in persisted.variants}
+        return expected_variants.issubset(persisted_variants)
+
+    def _cleanup_pending_files(self) -> None:
+        # 큐 조회나 개별 삭제가 실패해도 다음 시작/업로드/삭제에서 다시 시도한다.
+        try:
+            pending_deletions = self.db.find_pending_file_deletions()
+        except Exception:
+            LOGGER.exception("Unable to read pending file deletion queue")
+            return
+        for pending in pending_deletions:
+            try:
+                lock_key = pending.asset_sha256 or pending.storage_path
+                with self._upload_locks.hold(lock_key):
+                    if not self.db.is_file_deletion_ready(pending.deletion_id):
+                        continue
+                    delete_files([pending.storage_path])
+                    self.db.mark_file_deletion_completed(pending.deletion_id)
+            except Exception:
+                LOGGER.exception(
+                    "Unable to delete queued file %s",
+                    pending.storage_path,
+                )
 
     def handle_upload(self, request: "UploadRequest") -> tuple[int, Dict[str, Any]]:
         # 업로드는 multipart/form-data만 허용한다.
@@ -166,6 +219,15 @@ class UploadApplication:
                 self.settings.max_upload_bytes,
             )
             stored, asset_id = self._persist_staged_upload(original_filename, temp_path, byte_size)
+        except UploadTooLargeError as exc:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            return HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": str(exc)}
+        except ServiceTimeoutError:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            LOGGER.exception("Upload dependency timed out")
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Service temporarily unavailable"}
         except ValueError as exc:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
@@ -214,7 +276,11 @@ class UploadApplication:
                 self.db.mark_deleting(sha256)
                 delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
                 self.db.mark_deleted(sha256)
+            self._cleanup_pending_files()
             return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
+        except ServiceTimeoutError:
+            LOGGER.exception("Delete dependency timed out for %s", sha256)
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Service temporarily unavailable"}
         except Exception:
             # 파일 삭제는 missing_ok로 재시도 가능하므로 다음 DELETE 요청에서 복구할 수 있다.
             LOGGER.exception("Delete failed for %s", sha256)
@@ -240,6 +306,9 @@ class UploadApplication:
                     for variant in asset.variants
                 ],
             }
+        except ServiceTimeoutError:
+            LOGGER.exception("Asset lookup timed out for %s", sha256)
+            return HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Service temporarily unavailable"}
         except Exception:
             LOGGER.exception("Asset lookup failed for %s", sha256)
             return HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Internal server error"}
