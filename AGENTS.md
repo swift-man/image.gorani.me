@@ -105,6 +105,17 @@ Avoid on-demand thumbnail generation in this service unless explicitly designed 
 - design for orphan cleanup and retry after partial failure
 - keep public delivery concerns out of this codebase unless needed for coordination
 
+## Agent Response Rules
+
+- 코드가 변경되었다면 최종 응답에 재실행 명령어를 함께 안내한다.
+- 재실행 명령어는 현재 서비스 기준으로 `./scripts/run-service.sh`를 우선 안내하고, 필요한 환경변수가 있으면 같이 적는다.
+- 코드가 아닌 문서만 변경했다면 재실행이 필요 없다고 명확히 말한다.
+
+## PR Review Rules
+
+- PR 리뷰를 수행할 때 라인 코멘트를 남길 수 있는 도구나 권한이 있다면, 가능한 한 PR comment 또는 inline review comment로 남긴다.
+- PR comment를 남길 수 없는 환경이라면, 최종 응답에 파일과 라인 기준으로 리뷰 코멘트를 정리한다.
+
 ## Coordination With Nginx Project
 
 Anything that affects public URLs, static path layout, variant naming, or cache headers must be documented in `docs/nginx-integration.md` and treated as a contract with the Nginx project.
