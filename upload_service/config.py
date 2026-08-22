@@ -27,9 +27,9 @@ def _parse_widths(value: str) -> Tuple[int, ...]:
 
 
 def _parse_thumbnail_format(value: str | None) -> str:
-    # 현재 구현은 sips가 지원하는 포맷만 허용한다.
+    # 현재 썸네일 생성기가 지원하는 출력 포맷만 허용한다.
     if not value:
-        return "jpeg"
+        return "webp"
     value = value.strip().lower()
     if value not in {"jpeg", "png", "webp"}:
         raise ValueError(f"Unsupported thumbnail format: {value}")
@@ -41,6 +41,27 @@ def _parse_api_keys(value: str | None) -> FrozenSet[str]:
     if not value:
         return frozenset()
     return frozenset(item.strip() for item in value.split(",") if item.strip())
+
+
+def _load_dotenv() -> None:
+    # 프로젝트 루트의 .env를 읽어 셸에 아직 없는 변수만 채운다(셸 값이 우선).
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        if not key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 @dataclass(frozen=True)
@@ -70,6 +91,7 @@ class Settings:
 
 
 def load_settings() -> Settings:
+    _load_dotenv()
     # 공개 URL prefix는 항상 "/..." 형태가 되도록 보정한다.
     public_prefix = os.getenv("IMAGE_PUBLIC_PREFIX", "/i").rstrip("/")
     if not public_prefix.startswith("/"):
@@ -78,12 +100,14 @@ def load_settings() -> Settings:
     return Settings(
         host=os.getenv("IMAGE_UPLOAD_HOST", "127.0.0.1"),
         port=int(os.getenv("IMAGE_UPLOAD_PORT", "8080")),
-        storage_root=Path(os.getenv("IMAGE_STORAGE_ROOT", "./data")).expanduser().resolve(),
+        storage_root=Path(
+            os.getenv("IMAGE_STORAGE_ROOT", "/Volumes/gorani-images/image-store")
+        ).expanduser().resolve(),
         public_prefix=public_prefix,
         max_upload_bytes=int(os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))),
         enable_thumbnails=_parse_bool(os.getenv("IMAGE_ENABLE_THUMBNAILS"), True),
         thumbnail_widths=_parse_widths(os.getenv("IMAGE_THUMBNAIL_WIDTHS", "160,320,640")),
         thumbnail_format=_parse_thumbnail_format(os.getenv("IMAGE_THUMBNAIL_FORMAT")),
         api_keys=_parse_api_keys(os.getenv("IMAGE_API_KEYS")),
-        pg_database=os.getenv("DATABASE_URL") or os.getenv("PGDATABASE"),
+        pg_database=os.getenv("DATABASE_URL") or os.getenv("PGDATABASE", "postgres"),
     )

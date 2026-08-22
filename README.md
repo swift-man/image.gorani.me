@@ -173,6 +173,12 @@ NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 
 예시 파일은 [.env.example](.env.example)에 있습니다.
 
+```bash
+cp .env.example .env
+```
+
+프로젝트 루트의 `.env`는 서비스 시작 시 자동으로 읽습니다. 같은 이름의 환경변수가 셸에 이미 설정되어 있으면 셸 값을 우선 사용합니다.
+
 중요 환경변수:
 
 - `IMAGE_STORAGE_ROOT`: 실제 공유폴더 저장 루트
@@ -207,6 +213,12 @@ PGDATABASE=postgres \
 
 ```text
 Listening on http://127.0.0.1:8080
+```
+
+### 테스트 실행
+
+```bash
+python3 -m unittest discover -s tests -v
 ```
 
 ### 기본 포트 변경
