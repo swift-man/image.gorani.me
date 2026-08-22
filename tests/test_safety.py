@@ -387,6 +387,42 @@ class UploadSafetyTests(unittest.TestCase):
             self.assertEqual(payload["id"], 99)
             self.assertTrue(created_path.exists())
 
+    def test_ambiguous_database_result_requires_exact_variant_set(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+            asset = AssetRecord(
+                sha256="8" * 64,
+                original_filename="photo.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=5,
+                width=10,
+                height=10,
+                storage_path="/store/original.png",
+                public_url="/i/original/88/88/original.png",
+            )
+            stale_variant = VariantRecord(
+                kind="thumb_160",
+                format="webp",
+                width=160,
+                height=120,
+                byte_size=20,
+                storage_path="/store/stale.webp",
+                public_url="/i/variants/88/88/stale.webp",
+            )
+            stored = StoredAsset(asset=asset, variants=[], created_paths=[])
+            persisted = AssetLookup(
+                asset_id=88,
+                sha256=asset.sha256,
+                storage_path=asset.storage_path,
+                public_url=asset.public_url,
+                status="active",
+                variants=[stale_variant],
+            )
+
+            self.assertFalse(application._asset_matches_stored(persisted, stored))
+
     def test_unverifiable_database_result_preserves_files_for_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -579,6 +615,35 @@ class DatabaseSafetyTests(unittest.TestCase):
             self.assertIn("upserted_variants", sql)
             self.assertIn("CROSS JOIN variant_input", sql)
             self.assertIn("pending_file_deletions", sql)
+            self.assertIn("queued_removed_variant_files", sql)
+            self.assertIn("retired_variants", sql)
+            self.assertIn("'variant_removed'", sql)
+
+    def test_empty_variant_input_retires_all_active_variants(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            database = Database(settings)
+            asset = AssetRecord(
+                sha256="e" * 64,
+                original_filename="photo.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=100,
+                width=800,
+                height=600,
+                storage_path="/store/original.png",
+                public_url="/i/original/ee/ee/original.png",
+            )
+
+            with patch.object(database, "run_sql", return_value="42") as run_sql:
+                asset_id = database.insert_asset(asset, [])
+
+            self.assertEqual(asset_id, 42)
+            sql = run_sql.call_args.args[0]
+            self.assertIn("WHERE FALSE", sql)
+            self.assertIn("queued_removed_variant_files", sql)
+            self.assertIn("retired_variants", sql)
+            self.assertIn("completed_at = NULL", sql)
 
     def test_delete_starts_with_a_recoverable_database_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

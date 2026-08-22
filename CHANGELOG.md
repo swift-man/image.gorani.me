@@ -56,6 +56,7 @@
 - 프론트 업로드 문서에 `408 Request Timeout` 처리 방법을 추가했습니다.
 - README의 `file`, `sips`, Pillow 역할과 기본 WebP 생성 설명을 실제 구현에 맞췄습니다.
 - PNG와 WebP 원본도 EXIF 방향을 메타데이터와 썸네일 확대 판단에 반영합니다.
+- 썸네일 폭 축소 또는 비활성화 시 제외된 기존 variant를 비활성화하고 삭제 큐에 등록합니다.
 
 ### Notes
 

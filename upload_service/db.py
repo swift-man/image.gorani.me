@@ -170,8 +170,6 @@ class Database:
     def insert_asset(self, asset: AssetRecord, variants: Iterable[VariantRecord]) -> int:
         # 원본과 모든 파생 메타데이터를 한 SQL 문으로 저장해 부분 커밋을 막는다.
         variant_records = list(variants)
-        variant_cte = ""
-        variant_join = ""
         if variant_records:
             variant_rows = ",\n        ".join(
                 "(" + ", ".join(
@@ -187,10 +185,74 @@ class Database:
                 ) + ")"
                 for variant in variant_records
             )
-            variant_cte = f"""
+            variant_source = f"""VALUES
+        {variant_rows}"""
+        else:
+            # 입력이 없어도 기존 활성 variant를 모두 정리할 수 있게 타입이 있는 빈 집합을 만든다.
+            variant_source = """SELECT
+        NULL::text,
+        NULL::text,
+        NULL::integer,
+        NULL::integer,
+        NULL::bigint,
+        NULL::text,
+        NULL::text
+    WHERE FALSE"""
+
+        variant_cte = f"""
 , variant_input (kind, format, width, height, byte_size, storage_path, public_url) AS (
-    VALUES
-        {variant_rows}
+    {variant_source}
+), queued_variant_files AS (
+    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    SELECT
+        current_variant.storage_path,
+        inserted.sha256,
+        'variant_replaced'
+    FROM asset_variants current_variant
+    JOIN inserted ON inserted.id = current_variant.asset_id
+    JOIN variant_input ON variant_input.kind = current_variant.kind
+    WHERE current_variant.deleted_at IS NULL
+      AND current_variant.storage_path <> variant_input.storage_path
+    ON CONFLICT (storage_path) DO UPDATE
+    SET
+        asset_sha256 = EXCLUDED.asset_sha256,
+        reason = EXCLUDED.reason,
+        queued_at = NOW(),
+        completed_at = NULL
+    RETURNING id
+), queued_removed_variant_files AS (
+    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    SELECT
+        current_variant.storage_path,
+        inserted.sha256,
+        'variant_removed'
+    FROM asset_variants current_variant
+    JOIN inserted ON inserted.id = current_variant.asset_id
+    WHERE current_variant.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM variant_input
+          WHERE variant_input.kind = current_variant.kind
+      )
+    ON CONFLICT (storage_path) DO UPDATE
+    SET
+        asset_sha256 = EXCLUDED.asset_sha256,
+        reason = EXCLUDED.reason,
+        queued_at = NOW(),
+        completed_at = NULL
+    RETURNING id
+), retired_variants AS (
+    UPDATE asset_variants current_variant
+    SET deleted_at = NOW()
+    FROM inserted
+    WHERE current_variant.asset_id = inserted.id
+      AND current_variant.deleted_at IS NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM variant_input
+          WHERE variant_input.kind = current_variant.kind
+      )
+    RETURNING current_variant.id
 ), upserted_variants AS (
     INSERT INTO asset_variants (
         asset_id, kind, format, width, height, byte_size, storage_path, public_url
@@ -216,29 +278,13 @@ class Database:
         public_url = EXCLUDED.public_url,
         deleted_at = NULL
     RETURNING id
-), queued_variant_files AS (
-    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
-    SELECT
-        current_variant.storage_path,
-        inserted.sha256,
-        'variant_replaced'
-    FROM asset_variants current_variant
-    JOIN inserted ON inserted.id = current_variant.asset_id
-    JOIN variant_input ON variant_input.kind = current_variant.kind
-    WHERE current_variant.deleted_at IS NULL
-      AND current_variant.storage_path <> variant_input.storage_path
-    ON CONFLICT (storage_path) DO UPDATE
-    SET
-        asset_sha256 = EXCLUDED.asset_sha256,
-        reason = EXCLUDED.reason,
-        queued_at = NOW(),
-        completed_at = NULL
-    RETURNING id
 )
 """
-            variant_join = """
+        variant_join = """
 CROSS JOIN (SELECT COUNT(*) FROM upserted_variants) committed_variants
 CROSS JOIN (SELECT COUNT(*) FROM queued_variant_files) queued_files
+CROSS JOIN (SELECT COUNT(*) FROM queued_removed_variant_files) queued_removed_files
+CROSS JOIN (SELECT COUNT(*) FROM retired_variants) retired_files
 """.strip()
 
         # 같은 해시가 다시 들어오면 기존 레코드를 active 상태로 되살린다.

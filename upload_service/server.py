@@ -140,7 +140,7 @@ class UploadApplication:
             return False
         expected_variants = {variant.storage_path for variant in stored.variants}
         persisted_variants = {variant.storage_path for variant in persisted.variants}
-        return expected_variants.issubset(persisted_variants)
+        return expected_variants == persisted_variants
 
     def _start_cleanup_worker(self) -> None:
         if self._cleanup_thread is not None:
