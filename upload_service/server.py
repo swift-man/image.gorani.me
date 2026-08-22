@@ -28,9 +28,6 @@ class UploadApplication:
 
     def is_authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         # 읽기 API는 공개하고, 쓰기 API만 키 기반으로 보호한다.
-        if not self.settings.api_keys:
-            return True
-
         x_api_key = handler.headers.get("X-API-Key", "").strip()
         if x_api_key and x_api_key in self.settings.api_keys:
             return True

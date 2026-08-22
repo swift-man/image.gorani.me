@@ -48,25 +48,56 @@ def _storage_path(root: Path, sha256: str, filename: str) -> Path:
 
 
 def ensure_storage_roots(settings: Settings) -> None:
-    # 서버 시작 시 원본/파생 이미지 루트가 없으면 생성한다.
+    # 공유폴더가 끊긴 상태에서 로컬 디스크에 같은 경로를 만드는 사고를 막는다.
+    if settings.require_storage_mount and _mounted_ancestor(settings.storage_root) is None:
+        raise RuntimeError(f"Storage root is not on a mounted volume: {settings.storage_root}")
+
     settings.original_root.mkdir(parents=True, exist_ok=True)
     settings.variants_root.mkdir(parents=True, exist_ok=True)
+    # 디렉터리가 이미 있어도 실제 쓰기 권한이 없는 경우 시작 단계에서 실패시킨다.
+    with NamedTemporaryFile(prefix=".write-check-", dir=settings.storage_root):
+        pass
+
+
+def _mounted_ancestor(path: Path) -> Path | None:
+    candidate = path
+    while not candidate.exists():
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
+
+    while True:
+        if candidate.is_mount():
+            # 루트 파일시스템은 공유 저장소가 연결되었다는 증거가 아니다.
+            return None if candidate == Path(candidate.anchor) else candidate
+        parent = candidate.parent
+        if parent == candidate:
+            return None
+        candidate = parent
 
 
 def stage_upload(file_obj, original_filename: str, max_bytes: int) -> tuple[Path, int]:
     # 업로드는 먼저 임시 파일에 받고, 크기 제한을 넘으면 즉시 중단한다.
     total = 0
     suffix = Path(original_filename).suffix or ".upload"
-    with NamedTemporaryFile(prefix="upload-", suffix=suffix, delete=False) as temp_file:
-        while True:
-            chunk = file_obj.read(1024 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"Upload exceeds max size of {max_bytes} bytes")
-            temp_file.write(chunk)
-        return Path(temp_file.name), total
+    temp_path = None
+    try:
+        with NamedTemporaryFile(prefix="upload-", suffix=suffix, delete=False) as temp_file:
+            temp_path = Path(temp_file.name)
+            while True:
+                chunk = file_obj.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"Upload exceeds max size of {max_bytes} bytes")
+                temp_file.write(chunk)
+            return temp_path, total
+    except Exception:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise
 
 
 def finalize_store(temp_path: Path, destination: Path) -> None:

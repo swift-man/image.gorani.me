@@ -83,7 +83,7 @@ class LoadDotenvTests(unittest.TestCase):
             package_root.mkdir()
 
             with patch.object(config, "__file__", str(package_root / "config.py")):
-                with patch.dict(os.environ, {}, clear=True):
+                with patch.dict(os.environ, {"IMAGE_API_KEYS": "test-key"}, clear=True):
                     settings = config.load_settings()
 
                     self.assertEqual(
@@ -92,6 +92,52 @@ class LoadDotenvTests(unittest.TestCase):
                     )
                     self.assertEqual(settings.thumbnail_format, "webp")
                     self.assertEqual(settings.pg_database, "postgres")
+                    self.assertTrue(settings.require_storage_mount)
+
+    def test_load_settings_rejects_missing_api_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "IMAGE_API_KEYS"):
+                        config.load_settings()
+
+    def test_load_settings_rejects_root_public_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+
+            for public_prefix in ("", "/", "///"):
+                with self.subTest(public_prefix=public_prefix):
+                    environment = {
+                        "IMAGE_API_KEYS": "test-key",
+                        "IMAGE_PUBLIC_PREFIX": public_prefix,
+                    }
+                    with patch.object(config, "__file__", str(package_root / "config.py")):
+                        with patch.dict(os.environ, environment, clear=True):
+                            with self.assertRaisesRegex(ValueError, "IMAGE_PUBLIC_PREFIX"):
+                                config.load_settings()
+
+    def test_public_prefix_is_normalized(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+            environment = {
+                "IMAGE_API_KEYS": "test-key",
+                "IMAGE_PUBLIC_PREFIX": "images/",
+            }
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, environment, clear=True):
+                    settings = config.load_settings()
+
+                    self.assertEqual(settings.public_prefix, "/images")
+
+    def test_invalid_boolean_value_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Unsupported boolean value"):
+            config._parse_bool("tru", True)
 
 
 if __name__ == "__main__":

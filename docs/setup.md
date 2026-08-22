@@ -47,6 +47,7 @@ See [.env.example](/Users/m4_26/image.gorani.me/.env.example).
 
 Important values:
 - `IMAGE_STORAGE_ROOT`: mounted shared folder path
+- `IMAGE_REQUIRE_STORAGE_MOUNT`: require a non-root mounted volume before startup (`1` by default)
 - `IMAGE_PUBLIC_PREFIX`: public URL base expected by Nginx
 - `IMAGE_ENABLE_THUMBNAILS`: `1` or `0`
 - `IMAGE_THUMBNAIL_WIDTHS`: comma-separated widths
@@ -101,6 +102,7 @@ NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 - WebP thumbnail generation uses Pillow because this machine cannot write WebP reliably with `sips`
 - supported input formats depend on what `sips`, `file`, and Pillow can read
 - this version assumes the shared folder is already mounted before startup
+- startup fails if the configured shared folder is not mounted or writable
 - deletes are hard file deletes plus metadata soft-delete
 
 ## Recommended Next Steps

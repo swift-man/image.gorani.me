@@ -6,11 +6,16 @@ from pathlib import Path
 from typing import FrozenSet, Tuple
 
 
-def _parse_bool(value: str, default: bool) -> bool:
+def _parse_bool(value: str | None, default: bool) -> bool:
     # 환경변수의 다양한 진리값 표현을 하나로 정규화한다.
     if value is None:
         return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Unsupported boolean value: {value}")
 
 
 def _parse_widths(value: str) -> Tuple[int, ...]:
@@ -43,6 +48,14 @@ def _parse_api_keys(value: str | None) -> FrozenSet[str]:
     return frozenset(item.strip() for item in value.split(",") if item.strip())
 
 
+def _normalize_public_prefix(value: str) -> str:
+    # 루트 경로는 조합 시 // URL이 되므로 최소 한 개의 경로 세그먼트를 요구한다.
+    normalized = value.strip().strip("/")
+    if not normalized:
+        raise ValueError("IMAGE_PUBLIC_PREFIX must include a path such as /i")
+    return "/" + normalized
+
+
 def _load_dotenv() -> None:
     # 프로젝트 루트의 .env를 읽어 셸에 아직 없는 변수만 채운다(셸 값이 우선).
     env_path = Path(__file__).resolve().parent.parent / ".env"
@@ -71,6 +84,7 @@ class Settings:
     host: str
     port: int
     storage_root: Path
+    require_storage_mount: bool
     public_prefix: str
     max_upload_bytes: int
     enable_thumbnails: bool
@@ -92,10 +106,10 @@ class Settings:
 
 def load_settings() -> Settings:
     _load_dotenv()
-    # 공개 URL prefix는 항상 "/..." 형태가 되도록 보정한다.
-    public_prefix = os.getenv("IMAGE_PUBLIC_PREFIX", "/i").rstrip("/")
-    if not public_prefix.startswith("/"):
-        public_prefix = "/" + public_prefix
+    public_prefix = _normalize_public_prefix(os.getenv("IMAGE_PUBLIC_PREFIX", "/i"))
+    api_keys = _parse_api_keys(os.getenv("IMAGE_API_KEYS"))
+    if not api_keys:
+        raise ValueError("IMAGE_API_KEYS must contain at least one API key")
 
     return Settings(
         host=os.getenv("IMAGE_UPLOAD_HOST", "127.0.0.1"),
@@ -103,11 +117,12 @@ def load_settings() -> Settings:
         storage_root=Path(
             os.getenv("IMAGE_STORAGE_ROOT", "/Volumes/gorani-images/image-store")
         ).expanduser().resolve(),
+        require_storage_mount=_parse_bool(os.getenv("IMAGE_REQUIRE_STORAGE_MOUNT"), True),
         public_prefix=public_prefix,
         max_upload_bytes=int(os.getenv("IMAGE_MAX_UPLOAD_BYTES", str(20 * 1024 * 1024))),
         enable_thumbnails=_parse_bool(os.getenv("IMAGE_ENABLE_THUMBNAILS"), True),
         thumbnail_widths=_parse_widths(os.getenv("IMAGE_THUMBNAIL_WIDTHS", "160,320,640")),
         thumbnail_format=_parse_thumbnail_format(os.getenv("IMAGE_THUMBNAIL_FORMAT")),
-        api_keys=_parse_api_keys(os.getenv("IMAGE_API_KEYS")),
+        api_keys=api_keys,
         pg_database=os.getenv("DATABASE_URL") or os.getenv("PGDATABASE", "postgres"),
     )

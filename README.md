@@ -178,10 +178,12 @@ cp .env.example .env
 ```
 
 프로젝트 루트의 `.env`는 서비스 시작 시 자동으로 읽습니다. 같은 이름의 환경변수가 셸에 이미 설정되어 있으면 셸 값을 우선 사용합니다.
+복사 후 `IMAGE_API_KEYS`에는 반드시 직접 생성한 긴 임의 토큰을 입력하세요. 예시 파일은 안전을 위해 빈 값으로 둡니다.
 
 중요 환경변수:
 
 - `IMAGE_STORAGE_ROOT`: 실제 공유폴더 저장 루트
+- `IMAGE_REQUIRE_STORAGE_MOUNT`: 공유폴더 마운트 확인 여부. 운영 기본값은 `1`이며 로컬 저장소 개발 시에만 `0` 사용
 - `IMAGE_PUBLIC_PREFIX`: Nginx가 사용할 공개 URL prefix
 - `IMAGE_MAX_UPLOAD_BYTES`: 최대 업로드 크기
 - `IMAGE_ENABLE_THUMBNAILS`: 썸네일 생성 여부
@@ -194,6 +196,8 @@ cp .env.example .env
 - 실제 API 키, 비밀번호, 연결 문자열은 커밋하면 안 됩니다.
 - `.env` 파일은 `.gitignore`에 포함되어 있습니다.
 - `.env.example`에는 예시 값만 넣어두고, 실제 값은 로컬에서만 관리하세요.
+- `IMAGE_API_KEYS`가 비어 있으면 쓰기 API를 열지 않고 서비스 시작이 실패합니다.
+- 공유폴더가 마운트되지 않았거나 쓰기 권한이 없으면 서비스 시작이 실패합니다.
 
 ## 실행 방법
 
