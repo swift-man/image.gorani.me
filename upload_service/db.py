@@ -231,6 +231,16 @@ LIMIT 1;
             variants=variants,
         )
 
+    def mark_deleting(self, sha256: str) -> None:
+        # 파일 작업 전에 중간 상태를 남겨 프로세스가 중단되어도 삭제를 재시도할 수 있게 한다.
+        sql = f"""
+UPDATE assets
+SET status = 'deleting'
+WHERE sha256 = {_sql_literal(sha256)}
+  AND status IN ('active', 'deleting');
+"""
+        self.run_sql(sql)
+
     def mark_deleted(self, sha256: str) -> None:
         # 파일 삭제 이후 DB 상태를 deleted로 바꾸고 deleted_at도 기록한다.
         sql = f"""

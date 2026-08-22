@@ -202,14 +202,18 @@ class UploadApplication:
         }
 
     def handle_delete(self, sha256: str) -> tuple[int, Dict[str, Any]]:
-        # 삭제는 파일 제거 후 DB 상태를 deleted로 전환한다.
+        # 삭제 중 상태를 먼저 기록하고 같은 해시의 업로드와 직렬화한다.
         try:
-            asset = self.db.find_asset(sha256)
-            if asset is None:
-                return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
+            with self._upload_locks.hold(sha256):
+                asset = self.db.find_asset(sha256)
+                if asset is None:
+                    return HTTPStatus.NOT_FOUND, {"error": "Asset not found"}
+                if asset.status == "deleted":
+                    return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
 
-            delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
-            self.db.mark_deleted(sha256)
+                self.db.mark_deleting(sha256)
+                delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
+                self.db.mark_deleted(sha256)
             return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
         except Exception:
             # 파일 삭제는 missing_ok로 재시도 가능하므로 다음 DELETE 요청에서 복구할 수 있다.

@@ -224,6 +224,7 @@ class UploadSafetyTests(unittest.TestCase):
                 ],
             )
             application.db.find_asset = Mock(return_value=asset)
+            application.db.mark_deleting = Mock()
             application.db.mark_deleted = Mock(side_effect=[RuntimeError("db failed"), None])
 
             with patch("upload_service.server.LOGGER.exception"):
@@ -235,6 +236,7 @@ class UploadSafetyTests(unittest.TestCase):
             self.assertEqual(second_payload["status"], "deleted")
             self.assertFalse(original_path.exists())
             self.assertFalse(variant_path.exists())
+            self.assertEqual(application.db.mark_deleting.call_count, 2)
 
 
 class DatabaseSafetyTests(unittest.TestCase):
@@ -271,6 +273,18 @@ class DatabaseSafetyTests(unittest.TestCase):
             sql = run_sql.call_args.args[0]
             self.assertIn("upserted_variants", sql)
             self.assertIn("CROSS JOIN variant_input", sql)
+
+    def test_delete_starts_with_a_recoverable_database_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            database = Database(settings)
+
+            with patch.object(database, "run_sql") as run_sql:
+                database.mark_deleting("f" * 64)
+
+            sql = run_sql.call_args.args[0]
+            self.assertIn("status = 'deleting'", sql)
+            self.assertIn("status IN ('active', 'deleting')", sql)
 
 
 def _multipart_request(content: bytes):
