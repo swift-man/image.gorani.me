@@ -51,6 +51,9 @@ Important values:
 - `IMAGE_PUBLIC_PREFIX`: public URL base expected by Nginx
 - `IMAGE_MAX_UPLOAD_BYTES`: maximum compressed upload bytes
 - `IMAGE_MAX_IMAGE_PIXELS`: maximum decoded image pixel count
+- `IMAGE_MAX_WORKERS`: maximum concurrent HTTP request workers
+- `IMAGE_HTTP_TIMEOUT_SECONDS`: accepted socket read timeout
+- `IMAGE_CLEANUP_BATCH_SIZE`: background file cleanup batch size
 - `IMAGE_COMMAND_TIMEOUT_SECONDS`: timeout for `file` and `sips`
 - `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL connection, lock, and query timeout
 - `IMAGE_ENABLE_THUMBNAILS`: `1` or `0`
@@ -100,12 +103,16 @@ NEW_STORAGE_ROOT=/Volumes/gorani-images/image-store \
 ./scripts/fix-storage-root.sh
 ```
 
+The command loads the project `.env`, reuses the service database connection parser, and refuses to run unless `DATABASE_URL` or `PGDATABASE` explicitly selects a target database.
+
 ## Current Constraints
 
 - image inspection depends on macOS `sips`
 - WebP thumbnail generation uses Pillow because this machine cannot write WebP reliably with `sips`
 - supported input formats depend on what `sips`, `file`, and Pillow can read; thumbnail decoder failures return `400`
 - HTTP request workers are bounded by `IMAGE_MAX_WORKERS` and Pillow work runs in a timeout-controlled child process
+- accepted HTTP sockets time out according to `IMAGE_HTTP_TIMEOUT_SECONDS`
+- retired variant files are cleaned by one background worker in fixed-size batches
 - this version assumes the shared folder is already mounted before startup
 - startup fails if the configured shared folder is not mounted or writable
 - deletes are hard file deletes plus metadata soft-delete

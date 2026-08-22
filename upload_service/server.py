@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 from contextlib import contextmanager
 from http import HTTPStatus
@@ -63,13 +64,16 @@ class UploadApplication:
         self.settings = settings
         self.db = Database(settings)
         self._upload_locks = _HashLockPool()
+        self._cleanup_event = threading.Event()
+        self._cleanup_thread: threading.Thread | None = None
 
     def ensure_ready(self) -> None:
         # 서버 시작 시 저장소 루트와 DB 스키마를 준비한다.
         ensure_storage_roots(self.settings)
         schema_path = Path(__file__).resolve().parent.parent / "sql" / "schema.sql"
         self.db.apply_schema(schema_path)
-        self._cleanup_pending_files()
+        self._start_cleanup_worker()
+        self._schedule_cleanup()
 
     def is_authorized(self, handler: BaseHTTPRequestHandler) -> bool:
         # 읽기 API는 공개하고, 쓰기 API만 키 기반으로 보호한다.
@@ -123,7 +127,7 @@ class UploadApplication:
                 else:
                     delete_files(reversed(stored.created_paths))
                     raise
-        self._cleanup_pending_files()
+        self._schedule_cleanup()
         return stored, asset_id
 
     @staticmethod
@@ -138,13 +142,39 @@ class UploadApplication:
         persisted_variants = {variant.storage_path for variant in persisted.variants}
         return expected_variants.issubset(persisted_variants)
 
-    def _cleanup_pending_files(self) -> None:
-        # 큐 조회나 개별 삭제가 실패해도 다음 시작/업로드/삭제에서 다시 시도한다.
+    def _start_cleanup_worker(self) -> None:
+        if self._cleanup_thread is not None:
+            return
+        self._cleanup_thread = threading.Thread(
+            target=self._cleanup_worker,
+            name="image-file-cleanup",
+            daemon=True,
+        )
+        self._cleanup_thread.start()
+
+    def _schedule_cleanup(self) -> None:
+        # 테스트처럼 작업자가 시작되지 않은 경우에는 동기 정리를 암묵적으로 실행하지 않는다.
+        if self._cleanup_thread is not None:
+            self._cleanup_event.set()
+
+    def _cleanup_worker(self) -> None:
+        while True:
+            self._cleanup_event.wait()
+            self._cleanup_event.clear()
+            if self._cleanup_pending_files():
+                # 한 배치를 모두 처리했다면 다음 배치를 이어서 비운다.
+                self._cleanup_event.set()
+
+    def _cleanup_pending_files(self) -> bool:
+        # 작은 고정 배치만 처리하고 첫 실패에서 멈춰 DB 장애 시 작업 폭주를 막는다.
         try:
-            pending_deletions = self.db.find_pending_file_deletions()
+            pending_deletions = self.db.find_pending_file_deletions(
+                self.settings.cleanup_batch_size
+            )
         except Exception:
             LOGGER.exception("Unable to read pending file deletion queue")
-            return
+            return False
+        completed_count = 0
         for pending in pending_deletions:
             try:
                 lock_key = pending.asset_sha256 or pending.storage_path
@@ -153,11 +183,14 @@ class UploadApplication:
                         continue
                     delete_files([pending.storage_path])
                     self.db.mark_file_deletion_completed(pending.deletion_id)
+                    completed_count += 1
             except Exception:
                 LOGGER.exception(
                     "Unable to delete queued file %s",
                     pending.storage_path,
                 )
+                return False
+        return completed_count == self.settings.cleanup_batch_size
 
     def handle_upload(self, request: "UploadRequest") -> tuple[int, Dict[str, Any]]:
         # 업로드는 multipart/form-data만 허용한다.
@@ -195,6 +228,10 @@ class UploadApplication:
             for uploaded_file in uploaded_files:
                 uploaded_file.close()
             return HTTPStatus.BAD_REQUEST, {"error": "Malformed multipart body"}
+        except (TimeoutError, socket.timeout):
+            for uploaded_file in uploaded_files:
+                uploaded_file.close()
+            return HTTPStatus.REQUEST_TIMEOUT, {"error": "Request body timed out"}
         except Exception:
             for uploaded_file in uploaded_files:
                 uploaded_file.close()
@@ -276,7 +313,7 @@ class UploadApplication:
                 self.db.mark_deleting(sha256)
                 delete_files([variant.storage_path for variant in asset.variants] + [asset.storage_path])
                 self.db.mark_deleted(sha256)
-            self._cleanup_pending_files()
+            self._schedule_cleanup()
             return HTTPStatus.OK, {"status": "deleted", "sha256": sha256}
         except ServiceTimeoutError:
             LOGGER.exception("Delete dependency timed out for %s", sha256)
@@ -388,12 +425,19 @@ class UploadHTTPServer(ThreadingHTTPServer):
         handler_cls,
         app: UploadApplication,
         max_workers: int,
+        http_timeout_seconds: int,
     ) -> None:
         # accept 루프 자체에 역압력을 걸어 작업 대기 소켓도 무한히 쌓이지 않게 한다.
         self._worker_slots = threading.BoundedSemaphore(max_workers)
         self.request_queue_size = max_workers
+        self.http_timeout_seconds = http_timeout_seconds
         super().__init__(server_address, handler_cls)
         self.app = app
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(self.http_timeout_seconds)
+        return request, client_address
 
     def process_request(self, request, client_address) -> None:
         self._worker_slots.acquire()
@@ -420,6 +464,7 @@ def serve() -> None:
         UploadHandler,
         app,
         settings.max_workers,
+        settings.http_timeout_seconds,
     )
     print(f"Listening on http://{settings.host}:{settings.port}")
     server.serve_forever()

@@ -2,25 +2,15 @@
 
 set -euo pipefail
 
-old_root="${OLD_STORAGE_ROOT:-${HOME}/mnt/gorani-images/image-store}"
-new_root="${NEW_STORAGE_ROOT:-/Volumes/gorani-images/image-store}"
+script_dir="${0:A:h}"
+repo_root="${script_dir:h}"
+python_bin="${PYTHON_BIN:-${repo_root}/.venv/bin/python}"
 
-psql -X -v ON_ERROR_STOP=1 \
-  -v old_root="${old_root}" \
-  -v new_root="${new_root}" <<'SQL'
-BEGIN;
+if [[ ! -x "${python_bin}" ]]; then
+  print -u2 "Python runtime not found: ${python_bin}"
+  exit 1
+fi
 
-UPDATE assets
-SET storage_path = :'new_root' || substr(storage_path, length(:'old_root') + 1)
-WHERE left(storage_path, length(:'old_root') + 1) = :'old_root' || '/';
-
-UPDATE asset_variants
-SET storage_path = :'new_root' || substr(storage_path, length(:'old_root') + 1)
-WHERE left(storage_path, length(:'old_root') + 1) = :'old_root' || '/';
-
-COMMIT;
-SQL
-
-echo "Updated storage root:"
-echo "  from: ${old_root}"
-echo "    to: ${new_root}"
+# 프로젝트 모듈과 .env를 동일하게 찾도록 저장소 루트에서 관리 명령을 실행한다.
+cd "${repo_root}"
+exec "${python_bin}" -m upload_service.fix_storage_root

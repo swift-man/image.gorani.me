@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Iterable, List, Optional
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .config import Settings
+from .config import PostgreSQLSettings, Settings
 from .errors import DatabaseTimeoutError
 
 
@@ -76,7 +76,7 @@ class PendingFileDeletion:
 class Database:
     """psql CLI를 통해 PostgreSQL과 통신하는 얇은 저장소 계층."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings | PostgreSQLSettings) -> None:
         self.settings = settings
 
     def _psql_base_command(self) -> list[str]:
@@ -328,6 +328,8 @@ LIMIT 1;
 
     def find_pending_file_deletions(self, limit: int = 100) -> List[PendingFileDeletion]:
         # 현재 활성 메타데이터가 참조하지 않는 경로만 반환해 포맷 재전환 경합을 피한다.
+        if limit <= 0:
+            raise ValueError("Pending deletion limit must be positive")
         sql = f"""
 SELECT COALESCE(
     json_agg(

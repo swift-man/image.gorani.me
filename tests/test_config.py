@@ -93,6 +93,8 @@ class LoadDotenvTests(unittest.TestCase):
                     self.assertEqual(settings.thumbnail_format, "webp")
                     self.assertEqual(settings.max_image_pixels, 40_000_000)
                     self.assertEqual(settings.max_workers, 8)
+                    self.assertEqual(settings.http_timeout_seconds, 30)
+                    self.assertEqual(settings.cleanup_batch_size, 10)
                     self.assertEqual(settings.command_timeout_seconds, 30)
                     self.assertEqual(settings.db_timeout_seconds, 10)
                     self.assertIsNone(settings.database_url)
@@ -175,6 +177,43 @@ class LoadDotenvTests(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaisesRegex(ValueError, "IMAGE_MAX_WORKERS"):
                         config.load_settings()
+
+    def test_database_management_requires_an_explicit_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "DATABASE_URL or PGDATABASE"):
+                        config.load_database_settings(require_explicit_target=True)
+
+    def test_database_management_loads_target_from_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            project_root = Path(temporary_directory)
+            package_root = project_root / "upload_service"
+            package_root.mkdir()
+            (project_root / ".env").write_text("PGDATABASE=images\n", encoding="utf-8")
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(os.environ, {}, clear=True):
+                    settings = config.load_database_settings(require_explicit_target=True)
+
+            self.assertEqual(settings.pg_database, "images")
+
+    def test_database_management_rejects_url_without_database_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package_root = Path(temporary_directory) / "upload_service"
+            package_root.mkdir()
+
+            with patch.object(config, "__file__", str(package_root / "config.py")):
+                with patch.dict(
+                    os.environ,
+                    {"DATABASE_URL": "postgresql://database.example.com"},
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, "explicitly select"):
+                        config.load_database_settings(require_explicit_target=True)
 
     def test_database_url_requires_postgresql_scheme(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

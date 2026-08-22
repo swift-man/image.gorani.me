@@ -143,7 +143,11 @@ def build_asset_record(
     # 원본 검사 -> 해시 계산 -> 최종 저장 -> 파생 이미지 생성 순서로 진행한다.
     created_paths: List[str] = []
     try:
-        image_info = inspect_image(temp_path, settings.command_timeout_seconds)
+        image_info = inspect_image(
+            temp_path,
+            settings.command_timeout_seconds,
+            settings.max_image_pixels,
+        )
         if image_info.width * image_info.height > settings.max_image_pixels:
             raise ValueError(f"Image exceeds max pixel count of {settings.max_image_pixels}")
         safe_name = guess_download_name(original_filename, image_info.file_ext)
@@ -203,7 +207,11 @@ def generate_variants(
             created_paths.append(str(output_path))
         else:
             # 같은 파생 이미지가 이미 존재하면 메타데이터만 다시 읽는다.
-            variant_info = inspect_image(output_path, settings.command_timeout_seconds)
+            variant_info = inspect_image(
+                output_path,
+                settings.command_timeout_seconds,
+                settings.max_image_pixels,
+            )
         yield VariantRecord(
             kind=f"thumb_{width}",
             format=settings.thumbnail_format,

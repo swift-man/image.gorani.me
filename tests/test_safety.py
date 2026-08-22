@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import io
 import shutil
+import socket
 import subprocess
 import tempfile
+import threading
 import unittest
 from dataclasses import replace
 from functools import partial
@@ -29,6 +31,7 @@ from upload_service.errors import (
     ImageProcessingTimeoutError,
     InvalidImageError,
 )
+from upload_service.fix_storage_root import update_storage_root
 from upload_service.image_ops import ImageInfo
 from upload_service.server import (
     MAX_MULTIPART_OVERHEAD_BYTES,
@@ -49,6 +52,8 @@ def make_settings(storage_root: Path, *, require_storage_mount: bool) -> Setting
         max_upload_bytes=20 * 1024 * 1024,
         max_image_pixels=40_000_000,
         max_workers=8,
+        http_timeout_seconds=30,
+        cleanup_batch_size=10,
         command_timeout_seconds=30,
         db_timeout_seconds=10,
         enable_thumbnails=True,
@@ -147,6 +152,37 @@ class StorageSafetyTests(unittest.TestCase):
                         storage.build_asset_record(settings, "photo.png", staged, 5)
 
             finalize_store.assert_not_called()
+
+    @unittest.skipUnless(shutil.which("sips"), "macOS sips is required")
+    def test_oriented_dimensions_drive_metadata_and_prevent_thumbnail_upscaling(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root / "store", require_storage_mount=False)
+            settings = replace(settings, thumbnail_widths=(10, 30))
+            staged = root / "orientation-6.jpg"
+            image = Image.new("RGB", (40, 20), "red")
+            exif = Image.Exif()
+            exif[274] = 6
+            image.save(staged, format="JPEG", exif=exif)
+            image.close()
+            byte_size = staged.stat().st_size
+
+            stored = storage.build_asset_record(
+                settings,
+                "orientation-6.jpg",
+                staged,
+                byte_size,
+            )
+
+            self.assertEqual((stored.asset.width, stored.asset.height), (20, 40))
+            self.assertEqual(len(stored.variants), 1)
+            self.assertEqual(stored.variants[0].kind, "thumb_10")
+            self.assertEqual(
+                (stored.variants[0].width, stored.variants[0].height),
+                (10, 20),
+            )
 
     def test_delete_files_is_idempotent_for_missing_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -441,6 +477,7 @@ class UploadSafetyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root, require_storage_mount=False)
+            settings = replace(settings, cleanup_batch_size=1)
             application = UploadApplication(settings)
             current_path = root / "current.webp"
             current_path.write_bytes(b"current")
@@ -449,10 +486,47 @@ class UploadSafetyTests(unittest.TestCase):
             application.db.is_file_deletion_ready = Mock(return_value=False)
             application.db.mark_file_deletion_completed = Mock()
 
-            application._cleanup_pending_files()
+            should_continue = application._cleanup_pending_files()
 
             self.assertTrue(current_path.exists())
+            self.assertFalse(should_continue)
             application.db.mark_file_deletion_completed.assert_not_called()
+
+    def test_pending_cleanup_uses_a_fixed_batch_and_stops_on_first_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root, require_storage_mount=False)
+            settings = replace(settings, cleanup_batch_size=2)
+            application = UploadApplication(settings)
+            pending = [
+                PendingFileDeletion(1, str(root / "first.webp"), "1" * 64),
+                PendingFileDeletion(2, str(root / "second.webp"), "2" * 64),
+            ]
+            application.db.find_pending_file_deletions = Mock(return_value=pending)
+            application.db.is_file_deletion_ready = Mock(
+                side_effect=DatabaseTimeoutError("database timed out")
+            )
+            application.db.mark_file_deletion_completed = Mock()
+
+            with patch("upload_service.server.LOGGER.exception"):
+                should_continue = application._cleanup_pending_files()
+
+            self.assertFalse(should_continue)
+            application.db.find_pending_file_deletions.assert_called_once_with(2)
+            self.assertEqual(application.db.is_file_deletion_ready.call_count, 1)
+            application.db.mark_file_deletion_completed.assert_not_called()
+
+    def test_cleanup_is_scheduled_without_running_on_the_request_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+            application._cleanup_thread = Mock()
+
+            with patch.object(application, "_cleanup_pending_files") as cleanup:
+                application._schedule_cleanup()
+
+            cleanup.assert_not_called()
+            self.assertTrue(application._cleanup_event.is_set())
 
 
 class DatabaseSafetyTests(unittest.TestCase):
@@ -564,6 +638,23 @@ class DatabaseSafetyTests(unittest.TestCase):
                 with self.assertRaises(DatabaseTimeoutError):
                     database.run_sql("SELECT pg_sleep(30)")
 
+    def test_storage_root_update_uses_one_checked_transaction(self) -> None:
+        database = Mock()
+
+        update_storage_root(
+            database,
+            "/tmp/ksj's_%_root",
+            "/Volumes/gorani-images/image-store",
+        )
+
+        database.run_sql.assert_called_once()
+        sql = database.run_sql.call_args.args[0]
+        self.assertIn("BEGIN;", sql)
+        self.assertIn("to_regclass('assets')", sql)
+        self.assertIn("to_regclass('asset_variants')", sql)
+        self.assertIn("COMMIT;", sql)
+        self.assertNotIn("ksj's_%_root", sql)
+
 
 class ImageCommandSafetyTests(unittest.TestCase):
     def test_image_command_timeout_is_converted_to_service_timeout(self) -> None:
@@ -635,6 +726,75 @@ class ImageCommandSafetyTests(unittest.TestCase):
             with Image.open(destination) as thumbnail:
                 self.assertEqual(thumbnail.size, (10, 20))
 
+    def test_exif_orientations_normalize_metadata_dimensions(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            for orientation in (6, 8):
+                with self.subTest(orientation=orientation):
+                    source = Path(temporary_directory) / f"orientation-{orientation}.jpg"
+                    image = Image.new("RGB", (40, 20), "red")
+                    exif = Image.Exif()
+                    exif[274] = orientation
+                    image.save(source, format="JPEG", exif=exif)
+                    image.close()
+
+                    dimensions = image_ops.read_oriented_dimensions_with_pillow(
+                        source,
+                        max_pixels=1_000_000,
+                    )
+
+                    self.assertEqual(dimensions, (20, 40))
+
+    @unittest.skipUnless(shutil.which("sips"), "macOS sips is required")
+    def test_inspect_image_returns_display_oriented_dimensions(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            source = Path(temporary_directory) / "orientation-6.jpg"
+            image = Image.new("RGB", (40, 20), "red")
+            exif = Image.Exif()
+            exif[274] = 6
+            image.save(source, format="JPEG", exif=exif)
+            image.close()
+
+            info = image_ops.inspect_image(source, timeout_seconds=10)
+
+            self.assertEqual((info.width, info.height), (20, 40))
+
+    def test_pillow_uses_rgb_for_opaque_images_and_preserves_alpha(self) -> None:
+        from PIL import Image
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            opaque_source = root / "opaque.jpg"
+            opaque_output = root / "opaque.webp"
+            alpha_source = root / "alpha.png"
+            alpha_output = root / "alpha.webp"
+            Image.new("RGB", (20, 20), "red").save(opaque_source, "JPEG")
+            Image.new("RGBA", (20, 20), (255, 0, 0, 64)).save(alpha_source, "PNG")
+
+            image_ops.render_thumbnail_with_pillow(
+                opaque_source,
+                opaque_output,
+                width=10,
+                output_format="webp",
+                max_pixels=1_000_000,
+            )
+            image_ops.render_thumbnail_with_pillow(
+                alpha_source,
+                alpha_output,
+                width=10,
+                output_format="webp",
+                max_pixels=1_000_000,
+            )
+
+            with Image.open(opaque_output) as opaque_thumbnail:
+                self.assertEqual(opaque_thumbnail.mode, "RGB")
+            with Image.open(alpha_output) as alpha_thumbnail:
+                self.assertEqual(alpha_thumbnail.mode, "RGBA")
+                self.assertLess(alpha_thumbnail.getpixel((0, 0))[3], 255)
+
     @unittest.skipUnless(shutil.which("sips"), "macOS sips is required")
     def test_pillow_worker_process_creates_an_oriented_thumbnail(self) -> None:
         from PIL import Image
@@ -686,6 +846,7 @@ class ServerConcurrencySafetyTests(unittest.TestCase):
                 UploadHandler,
                 application,
                 max_workers=2,
+                http_timeout_seconds=30,
             )
             try:
                 self.assertEqual(server.request_queue_size, 2)
@@ -694,6 +855,49 @@ class ServerConcurrencySafetyTests(unittest.TestCase):
                 self.assertFalse(server._worker_slots.acquire(blocking=False))
             finally:
                 server.server_close()
+
+    def test_partial_request_body_times_out_and_releases_the_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            settings = replace(settings, max_workers=1, http_timeout_seconds=1)
+            application = UploadApplication(settings)
+            server = UploadHTTPServer(
+                ("127.0.0.1", 0),
+                UploadHandler,
+                application,
+                max_workers=1,
+                http_timeout_seconds=1,
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            host, port = server.server_address
+            try:
+                with socket.create_connection((host, port), timeout=3) as client:
+                    client.settimeout(4)
+                    client.sendall(
+                        b"POST /upload HTTP/1.1\r\n"
+                        b"Host: localhost\r\n"
+                        b"X-API-Key: test-key\r\n"
+                        b"Content-Type: multipart/form-data; boundary=slow\r\n"
+                        b"Content-Length: 1000\r\n\r\n"
+                        b"--slow\r\n"
+                    )
+                    response = client.recv(4096)
+
+                self.assertIn(b"408 Request Timeout", response)
+
+                with socket.create_connection((host, port), timeout=3) as health_client:
+                    health_client.settimeout(3)
+                    health_client.sendall(
+                        b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    )
+                    health_response = health_client.recv(4096)
+
+                self.assertIn(b"200 OK", health_response)
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=3)
 
 
 def _multipart_request(content: bytes):

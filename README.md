@@ -164,6 +164,7 @@ export PGDATABASE=postgres
 ```
 
 기존 DB에 잘못된 경로가 이미 저장되어 있다면 아래 스크립트로 한 번에 정리할 수 있습니다.
+이 명령은 프로젝트 `.env`를 읽으며, `DATABASE_URL` 또는 `PGDATABASE`로 대상을 명시해야 실행됩니다.
 
 ```bash
 OLD_STORAGE_ROOT="$HOME/mnt/gorani-images/image-store" \
@@ -190,6 +191,8 @@ cp .env.example .env
 - `IMAGE_MAX_UPLOAD_BYTES`: 최대 업로드 크기
 - `IMAGE_MAX_IMAGE_PIXELS`: 디코딩할 이미지의 최대 픽셀 수. 기본값은 `40000000`
 - `IMAGE_MAX_WORKERS`: 동시에 처리할 HTTP 요청 수. 기본값은 `8`
+- `IMAGE_HTTP_TIMEOUT_SECONDS`: HTTP 헤더·본문 소켓 제한시간. 기본값은 `30`
+- `IMAGE_CLEANUP_BATCH_SIZE`: 백그라운드 파일 정리 1회 처리량. 기본값은 `10`
 - `IMAGE_COMMAND_TIMEOUT_SECONDS`: `file`, `sips`, Pillow 이미지 처리 제한시간. 기본값은 `30`
 - `IMAGE_DB_TIMEOUT_SECONDS`: PostgreSQL 연결·잠금·쿼리 제한시간. 기본값은 `10`
 - `IMAGE_ENABLE_THUMBNAILS`: 썸네일 생성 여부
