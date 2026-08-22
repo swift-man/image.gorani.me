@@ -134,12 +134,24 @@ class UploadApplication:
     def _asset_matches_stored(persisted, stored: StoredAsset) -> bool:
         if persisted is None or persisted.status != "active":
             return False
-        if persisted.sha256 != stored.asset.sha256:
+        asset_fields = (
+            "sha256",
+            "original_filename",
+            "content_type",
+            "file_ext",
+            "byte_size",
+            "width",
+            "height",
+            "storage_path",
+            "public_url",
+        )
+        if any(
+            getattr(persisted, field) != getattr(stored.asset, field)
+            for field in asset_fields
+        ):
             return False
-        if persisted.storage_path != stored.asset.storage_path:
-            return False
-        expected_variants = {variant.storage_path for variant in stored.variants}
-        persisted_variants = {variant.storage_path for variant in persisted.variants}
+        expected_variants = {variant.kind: variant for variant in stored.variants}
+        persisted_variants = {variant.kind: variant for variant in persisted.variants}
         return expected_variants == persisted_variants
 
     def _start_cleanup_worker(self) -> None:

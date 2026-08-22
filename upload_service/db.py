@@ -58,6 +58,12 @@ class AssetLookup:
 
     asset_id: int
     sha256: str
+    original_filename: str
+    content_type: str
+    file_ext: str
+    byte_size: int
+    width: int
+    height: int
     storage_path: str
     public_url: str
     status: str
@@ -331,6 +337,12 @@ FROM inserted
 SELECT json_build_object(
     'asset_id', a.id,
     'sha256', a.sha256,
+    'original_filename', a.original_filename,
+    'content_type', a.content_type,
+    'file_ext', a.file_ext,
+    'byte_size', a.byte_size,
+    'width', a.width,
+    'height', a.height,
     'storage_path', a.storage_path,
     'public_url', a.public_url,
     'status', a.status,
@@ -366,6 +378,12 @@ LIMIT 1;
         return AssetLookup(
             asset_id=payload["asset_id"],
             sha256=payload["sha256"],
+            original_filename=payload["original_filename"],
+            content_type=payload["content_type"],
+            file_ext=payload["file_ext"],
+            byte_size=payload["byte_size"],
+            width=payload["width"],
+            height=payload["height"],
             storage_path=payload["storage_path"],
             public_url=payload["public_url"],
             status=payload["status"],

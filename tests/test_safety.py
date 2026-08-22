@@ -15,6 +15,8 @@ from tempfile import NamedTemporaryFile
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from python_multipart.exceptions import MultipartParseError
+
 from upload_service import storage
 from upload_service import image_ops
 from upload_service.config import Settings
@@ -295,6 +297,12 @@ class UploadSafetyTests(unittest.TestCase):
             asset = AssetLookup(
                 asset_id=1,
                 sha256="c" * 64,
+                original_filename="original.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=8,
+                width=10,
+                height=10,
                 storage_path=str(original_path),
                 public_url="/i/original/cc/cc/original.png",
                 status="active",
@@ -359,6 +367,12 @@ class UploadSafetyTests(unittest.TestCase):
             persisted = AssetLookup(
                 asset_id=99,
                 sha256=asset.sha256,
+                original_filename=asset.original_filename,
+                content_type=asset.content_type,
+                file_ext=asset.file_ext,
+                byte_size=asset.byte_size,
+                width=asset.width,
+                height=asset.height,
                 storage_path=asset.storage_path,
                 public_url=asset.public_url,
                 status="active",
@@ -415,6 +429,12 @@ class UploadSafetyTests(unittest.TestCase):
             persisted = AssetLookup(
                 asset_id=88,
                 sha256=asset.sha256,
+                original_filename=asset.original_filename,
+                content_type=asset.content_type,
+                file_ext=asset.file_ext,
+                byte_size=asset.byte_size,
+                width=asset.width,
+                height=asset.height,
                 storage_path=asset.storage_path,
                 public_url=asset.public_url,
                 status="active",
@@ -422,6 +442,70 @@ class UploadSafetyTests(unittest.TestCase):
             )
 
             self.assertFalse(application._asset_matches_stored(persisted, stored))
+
+    def test_ambiguous_database_result_rejects_metadata_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+            asset = AssetRecord(
+                sha256="7" * 64,
+                original_filename="photo.png",
+                content_type="image/png",
+                file_ext=".png",
+                byte_size=100,
+                width=800,
+                height=600,
+                storage_path="/store/original.png",
+                public_url="/i/original/77/77/original.png",
+            )
+            expected_variant = VariantRecord(
+                kind="thumb_160",
+                format="webp",
+                width=160,
+                height=120,
+                byte_size=20,
+                storage_path="/store/thumb_160.webp",
+                public_url="/i/variants/77/77/thumb_160.webp",
+            )
+            stored = StoredAsset(
+                asset=asset,
+                variants=[expected_variant],
+                created_paths=[],
+            )
+            persisted = AssetLookup(
+                asset_id=77,
+                sha256=asset.sha256,
+                original_filename=asset.original_filename,
+                content_type=asset.content_type,
+                file_ext=asset.file_ext,
+                byte_size=asset.byte_size,
+                width=asset.width,
+                height=asset.height,
+                storage_path=asset.storage_path,
+                public_url="/i/old/original.png",
+                status="active",
+                variants=[expected_variant],
+            )
+
+            self.assertFalse(application._asset_matches_stored(persisted, stored))
+
+            persisted.public_url = asset.public_url
+            persisted.variants = [replace(expected_variant, width=159)]
+            self.assertFalse(application._asset_matches_stored(persisted, stored))
+
+    def test_multipart_parse_error_is_reported_as_bad_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory), require_storage_mount=False)
+            application = UploadApplication(settings)
+
+            with patch(
+                "upload_service.server.parse_form",
+                side_effect=MultipartParseError("broken boundary"),
+            ):
+                status, payload = application.handle_upload(_multipart_request(b"broken"))
+
+            self.assertEqual(status, HTTPStatus.BAD_REQUEST)
+            self.assertEqual(payload, {"error": "Malformed multipart body"})
 
     def test_unverifiable_database_result_preserves_files_for_reconciliation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
