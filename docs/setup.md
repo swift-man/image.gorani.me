@@ -84,6 +84,8 @@ IMAGE_STORAGE_ROOT=/Volumes/gorani-images/image-store ./scripts/prepare-storage.
 
 For the production upload Mac, connect to the share once in Finder and save the `ksj` credentials in macOS Keychain. No password is stored in this repository or in the LaunchAgent plist.
 
+Do not include a password in `GORANI_SMB_URL`. The installer rejects `smb://user:password@host/share` values so credentials can only be supplied by macOS Keychain.
+
 This is a per-user LaunchAgent, so it starts after the `m4_26` user logs in to macOS, not before login. Finder and Keychain SMB access require that graphical login session.
 
 Install and immediately start the per-user LaunchAgent:

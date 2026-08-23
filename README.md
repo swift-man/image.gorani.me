@@ -226,6 +226,8 @@ smb://ksj@DESKTOP-0217PLD/gorani-images
 
 비밀번호 입력 화면에서 키체인 저장을 선택해야 재부팅 후 비밀번호를 파일에 기록하지 않고 자동으로 연결할 수 있습니다. 그다음 LaunchAgent를 설치합니다.
 
+SMB 주소에는 비밀번호를 포함하지 마세요. `smb://사용자:비밀번호@서버/공유` 형식은 plist에 자격 증명이 남는 것을 막기 위해 설치 단계에서 거부하며, 비밀번호는 macOS 키체인으로만 관리합니다.
+
 ```bash
 ./scripts/install-launch-agent.sh
 ```

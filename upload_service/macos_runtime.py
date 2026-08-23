@@ -6,23 +6,40 @@ import plistlib
 import signal
 import socket
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any, Dict, Sequence, Tuple
-from urllib.parse import unquote, urlsplit
+from urllib.parse import SplitResult, unquote, urlsplit
+
+
+def _parse_smb_location(value: str) -> SplitResult:
+    normalized = value if value.startswith("smb://") else "smb:" + value
+    parsed = urlsplit(normalized)
+    if parsed.scheme != "smb" or not parsed.hostname:
+        raise ValueError("Invalid SMB location")
+    if parsed.password is not None:
+        raise ValueError("SMB URL must not include a password; use macOS Keychain")
+    if not parsed.path.strip("/"):
+        raise ValueError("SMB share is missing")
+    return parsed
+
+
+def smb_host_from_url(value: str) -> str:
+    """비밀번호 없는 SMB URL에서 연결 확인에 사용할 호스트를 얻는다."""
+
+    parsed = _parse_smb_location(value)
+    assert parsed.hostname is not None
+    return parsed.hostname
 
 
 def _normalized_smb_identity(value: str) -> Tuple[str, str, str]:
     """SMB URL과 mount 원본을 동일한 서버·사용자·공유 식별자로 바꾼다."""
 
-    normalized = value if value.startswith("smb://") else "smb:" + value
-    parsed = urlsplit(normalized)
-    if parsed.scheme != "smb" or not parsed.hostname:
-        raise ValueError(f"Invalid SMB location: {value}")
+    parsed = _parse_smb_location(value)
     username = unquote(parsed.username or "").lower()
     share = unquote(parsed.path.strip("/")).lower()
-    if not share:
-        raise ValueError(f"SMB share is missing: {value}")
+    assert parsed.hostname is not None
     return username, parsed.hostname.lower(), share
 
 
@@ -46,14 +63,26 @@ def mount_matches(mount_output: str, mount_point: str, smb_url: str) -> bool:
         return False
 
 
-def _bounded_stat(path: Path, timeout_seconds: float) -> None:
+def _is_same_or_child(parent: Path, child: Path) -> bool:
+    try:
+        child.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _bounded_storage_paths(
+    mount_point: Path,
+    storage_root: Path,
+    timeout_seconds: float,
+) -> Tuple[Path, Path]:
     def raise_timeout(_signum, _frame) -> None:
-        raise TimeoutError(f"Storage probe timed out: {path}")
+        raise TimeoutError("Storage path resolution timed out")
 
     previous_handler = signal.signal(signal.SIGALRM, raise_timeout)
     try:
         signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
-        path.stat()
+        return mount_point.resolve(strict=True), storage_root.resolve(strict=True)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
@@ -68,6 +97,12 @@ def check_storage(
     """기대 SMB 대상, 서버 연결, 저장소 접근을 모두 제한시간 안에 확인한다."""
 
     try:
+        _username, host, _share = _normalized_smb_identity(smb_url)
+        lexical_mount = Path(os.path.abspath(mount_point))
+        lexical_storage = Path(os.path.abspath(storage_root))
+        if not _is_same_or_child(lexical_mount, lexical_storage):
+            return False, "storage root is outside the SMB mount point"
+
         mount_result = subprocess.run(
             ["/sbin/mount"],
             check=True,
@@ -78,10 +113,15 @@ def check_storage(
         if not mount_matches(mount_result.stdout, str(mount_point), smb_url):
             return False, "expected SMB share is not mounted"
 
-        _username, host, _share = _normalized_smb_identity(smb_url)
         with socket.create_connection((host, 445), timeout=timeout_seconds):
             pass
-        _bounded_stat(storage_root, timeout_seconds)
+        actual_mount, actual_storage = _bounded_storage_paths(
+            mount_point,
+            storage_root,
+            timeout_seconds,
+        )
+        if not _is_same_or_child(actual_mount, actual_storage):
+            return False, "storage root resolves outside the SMB mount point"
     except (OSError, subprocess.SubprocessError, TimeoutError, ValueError) as exc:
         return False, str(exc)
     return True, "ready"
@@ -97,6 +137,7 @@ def render_launch_agent(
     with template_path.open("rb") as handle:
         config: Dict[str, Any] = plistlib.load(handle)
 
+    smb_host = smb_host_from_url(values["smb_url"])
     config["ProgramArguments"] = [
         values["app_executable"],
         values["supervisor_script"],
@@ -104,7 +145,7 @@ def render_launch_agent(
     config["WorkingDirectory"] = values["project_root"]
     config["EnvironmentVariables"] = {
         "PATH": values["runtime_path"],
-        "GORANI_SMB_HOST": values["smb_host"],
+        "GORANI_SMB_HOST": smb_host,
         "GORANI_SMB_URL": values["smb_url"],
         "GORANI_SMB_MOUNT_POINT": values["mount_point"],
         "IMAGE_STORAGE_ROOT": values["storage_root"],
@@ -142,6 +183,9 @@ def _build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--timeout", type=float, default=2.0)
     check_parser.add_argument("--verbose", action="store_true")
 
+    host_parser = subparsers.add_parser("smb-host")
+    host_parser.add_argument("--smb-url", required=True)
+
     render_parser = subparsers.add_parser("render-plist")
     render_parser.add_argument("--template", type=Path, required=True)
     render_parser.add_argument("--output", type=Path, required=True)
@@ -150,7 +194,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "supervisor-script",
         "project-root",
         "runtime-path",
-        "smb-host",
         "smb-url",
         "mount-point",
         "storage-root",
@@ -165,24 +208,32 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "check-storage":
-        ready, message = check_storage(
-            args.smb_url,
-            args.mount_point,
-            args.storage_root,
-            args.timeout,
-        )
-        if args.verbose or not ready:
-            print(message)
-        return 0 if ready else 1
+    try:
+        if args.command == "check-storage":
+            ready, message = check_storage(
+                args.smb_url,
+                args.mount_point,
+                args.storage_root,
+                args.timeout,
+            )
+            if args.verbose or not ready:
+                print(message)
+            return 0 if ready else 1
 
-    values = {
-        key: value
-        for key, value in vars(args).items()
-        if key not in {"command", "template", "output"}
-    }
-    render_launch_agent(args.template, args.output, values)
-    return 0
+        if args.command == "smb-host":
+            print(smb_host_from_url(args.smb_url))
+            return 0
+
+        values = {
+            key: value
+            for key, value in vars(args).items()
+            if key not in {"command", "template", "output"}
+        }
+        render_launch_agent(args.template, args.output, values)
+        return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

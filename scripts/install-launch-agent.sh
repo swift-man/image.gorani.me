@@ -7,6 +7,7 @@ uid="$(id -u)"
 domain="gui/${uid}"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
+cd "${project_root}"
 template_path="${project_root}/launchd/${label}.plist.template"
 launcher_source="${project_root}/launchd/GoraniImageUploadLauncher.swift"
 launcher_info="${project_root}/launchd/GoraniImageUpload-Info.plist"
@@ -17,7 +18,6 @@ app_path="${HOME}/Applications/GoraniImageUpload.app"
 app_contents="${app_path}/Contents"
 app_executable="${app_contents}/MacOS/GoraniImageUpload"
 
-smb_host="${GORANI_SMB_HOST:-DESKTOP-0217PLD}"
 smb_url="${GORANI_SMB_URL:-smb://ksj@DESKTOP-0217PLD/gorani-images}"
 mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
 storage_root="${GORANI_LAUNCHD_STORAGE_ROOT:-${mount_point}/image-store}"
@@ -46,6 +46,11 @@ if [[ -z "${psql_bin}" ]]; then
 fi
 if [[ ! -x "${python_bin}" ]]; then
   print -u2 "프로젝트 Python을 찾을 수 없습니다: ${python_bin}"
+  exit 1
+fi
+if ! "${python_bin}" -m upload_service.macos_runtime smb-host \
+  --smb-url "${smb_url}" >/dev/null; then
+  print -u2 "SMB URL을 사용할 수 없습니다. 비밀번호는 URL 대신 macOS 키체인에 저장하세요."
   exit 1
 fi
 runtime_path="$(dirname "${psql_bin}"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -77,7 +82,6 @@ fi
   --supervisor-script "${project_root}/scripts/supervise-service.sh" \
   --project-root "${project_root}" \
   --runtime-path "${runtime_path}" \
-  --smb-host "${smb_host}" \
   --smb-url "${smb_url}" \
   --mount-point "${mount_point}" \
   --storage-root "${storage_root}" \

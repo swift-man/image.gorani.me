@@ -4,7 +4,7 @@ set -u
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 project_root="$(cd "${script_dir}/.." && pwd)"
-smb_host="${GORANI_SMB_HOST:-DESKTOP-0217PLD}"
+cd "${project_root}" || exit 1
 smb_url="${GORANI_SMB_URL:-smb://ksj@DESKTOP-0217PLD/gorani-images}"
 mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
 storage_root="${IMAGE_STORAGE_ROOT:-${mount_point}/image-store}"
@@ -14,6 +14,12 @@ terminate_seconds="${GORANI_TERMINATE_SECONDS:-10}"
 kill_seconds="${GORANI_KILL_SECONDS:-5}"
 python_bin="${project_root}/.venv/bin/python"
 service_pid=""
+
+if ! smb_host="$("${python_bin}" -m upload_service.macos_runtime smb-host \
+  --smb-url "${smb_url}")"; then
+  print -u2 "SMB URL을 사용할 수 없습니다. 비밀번호는 URL 대신 macOS 키체인에 저장하세요."
+  exit 1
+fi
 
 log() {
   printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -92,7 +98,6 @@ while true; do
   wait_for_storage
   log "SMB 저장소가 준비되었습니다: ${mount_point}"
 
-  cd "${project_root}" || exit 1
   "${project_root}/scripts/run-service.sh" &
   service_pid=$!
   log "업로드 서비스를 시작했습니다. pid=${service_pid}"

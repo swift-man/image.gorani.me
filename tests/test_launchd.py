@@ -33,7 +33,6 @@ class LaunchAgentAssetTests(unittest.TestCase):
                     "supervisor_script": "/tmp/image|gorani/scripts/supervise.sh",
                     "project_root": "/tmp/image<gorani>",
                     "runtime_path": "/opt/homebrew/bin:/usr/bin:/bin",
-                    "smb_host": "DESKTOP-0217PLD",
                     "smb_url": "smb://ksj@DESKTOP-0217PLD/gorani&images",
                     "mount_point": "/Volumes/gorani<images>",
                     "storage_root": "/Volumes/gorani<images>/image-store",
@@ -64,6 +63,10 @@ class LaunchAgentAssetTests(unittest.TestCase):
             config["EnvironmentVariables"]["PATH"],
         )
         self.assertEqual(config["EnvironmentVariables"]["IMAGE_UPLOAD_PORT"], "8090")
+        self.assertEqual(
+            config["EnvironmentVariables"]["GORANI_SMB_HOST"],
+            "desktop-0217pld",
+        )
 
     def test_launch_agent_assets_do_not_contain_a_password(self) -> None:
         managed_paths = [
@@ -132,7 +135,9 @@ class LaunchAgentAssetTests(unittest.TestCase):
         ), patch(
             "upload_service.macos_runtime.socket.create_connection",
             side_effect=OSError("SMB server is unreachable"),
-        ), patch("upload_service.macos_runtime._bounded_stat") as bounded_stat:
+        ), patch(
+            "upload_service.macos_runtime._bounded_storage_paths"
+        ) as bounded_paths:
             ready, message = check_storage(
                 "smb://ksj@DESKTOP-0217PLD/gorani-images",
                 Path("/Volumes/gorani-images"),
@@ -142,7 +147,64 @@ class LaunchAgentAssetTests(unittest.TestCase):
 
         self.assertFalse(ready)
         self.assertIn("unreachable", message)
-        bounded_stat.assert_not_called()
+        bounded_paths.assert_not_called()
+
+    def test_storage_check_rejects_a_root_on_another_volume(self) -> None:
+        mount_output = (
+            "//ksj@DESKTOP-0217PLD/gorani-images on /Volumes/gorani-images "
+            "(smbfs, nodev, nosuid)\n"
+        )
+        mount_result = subprocess.CompletedProcess(
+            args=["/sbin/mount"],
+            returncode=0,
+            stdout=mount_output,
+            stderr="",
+        )
+
+        with patch(
+            "upload_service.macos_runtime.subprocess.run",
+            return_value=mount_result,
+        ), patch(
+            "upload_service.macos_runtime.socket.create_connection"
+        ), patch(
+            "upload_service.macos_runtime._bounded_storage_paths",
+            return_value=(
+                Path("/Volumes/gorani-images"),
+                Path("/Volumes/other/image-store"),
+            ),
+        ):
+            ready, message = check_storage(
+                "smb://ksj@DESKTOP-0217PLD/gorani-images",
+                Path("/Volumes/gorani-images"),
+                Path("/Volumes/gorani-images/image-store"),
+                2,
+            )
+
+        self.assertFalse(ready)
+        self.assertIn("resolves outside", message)
+
+    def test_plist_renderer_rejects_an_smb_password(self) -> None:
+        template_path = PROJECT_ROOT / "launchd" / f"{LABEL}.plist.template"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "agent.plist"
+            values = {
+                "app_executable": "/tmp/GoraniImageUpload",
+                "supervisor_script": "/tmp/supervise-service.sh",
+                "project_root": str(PROJECT_ROOT),
+                "runtime_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "smb_url": "smb://user:secret@DESKTOP-0217PLD/gorani-images",
+                "mount_point": "/Volumes/gorani-images",
+                "storage_root": "/Volumes/gorani-images/image-store",
+                "upload_host": "127.0.0.1",
+                "upload_port": "8080",
+                "stdout_path": "/tmp/service.log",
+                "stderr_path": "/tmp/service-error.log",
+            }
+
+            with self.assertRaisesRegex(ValueError, "must not include a password"):
+                render_launch_agent(template_path, output_path, values)
+
+            self.assertFalse(output_path.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "LaunchAgent is macOS-only")
     def test_status_uses_installed_port_and_fails_on_component_errors(self) -> None:
@@ -158,7 +220,6 @@ class LaunchAgentAssetTests(unittest.TestCase):
                     "supervisor_script": "/tmp/supervise-service.sh",
                     "project_root": str(PROJECT_ROOT),
                     "runtime_path": "/usr/bin:/bin:/usr/sbin:/sbin",
-                    "smb_host": "unreachable.invalid",
                     "smb_url": "smb://user@unreachable.invalid/images",
                     "mount_point": "/Volumes/not-mounted",
                     "storage_root": "/Volumes/not-mounted/image-store",
