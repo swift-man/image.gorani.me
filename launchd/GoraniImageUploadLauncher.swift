@@ -51,8 +51,9 @@ let signalSources = forwardedSignals.map { signalNumber -> DispatchSourceSignal 
 
 do {
     try process.run()
-    process.waitUntilExit()
-    _ = signalSources
+    withExtendedLifetime(signalSources) {
+        process.waitUntilExit()
+    }
     exit(process.terminationStatus)
 } catch {
     FileHandle.standardError.write(

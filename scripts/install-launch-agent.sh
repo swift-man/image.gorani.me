@@ -22,6 +22,7 @@ smb_url="${GORANI_SMB_URL:-smb://ksj@DESKTOP-0217PLD/gorani-images}"
 mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
 storage_root="${GORANI_LAUNCHD_STORAGE_ROOT:-${mount_point}/image-store}"
 psql_bin="$(command -v psql 2>/dev/null || true)"
+python_bin="${project_root}/.venv/bin/python"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   print -u2 "이 설치 스크립트는 macOS에서만 사용할 수 있습니다."
@@ -43,7 +44,19 @@ if [[ -z "${psql_bin}" ]]; then
   print -u2 "psql 실행 파일을 찾을 수 없습니다. PostgreSQL 설치 경로를 PATH에 추가하세요."
   exit 1
 fi
+if [[ ! -x "${python_bin}" ]]; then
+  print -u2 "프로젝트 Python을 찾을 수 없습니다: ${python_bin}"
+  exit 1
+fi
 runtime_path="$(dirname "${psql_bin}"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+settings_lines=("${(@f)$(${python_bin} -c '
+from upload_service.config import load_settings
+settings = load_settings()
+print(settings.host)
+print(settings.port)
+')}")
+upload_host="${GORANI_LAUNCHD_UPLOAD_HOST:-${settings_lines[1]}}"
+upload_port="${GORANI_LAUNCHD_UPLOAD_PORT:-${settings_lines[2]}}"
 
 mkdir -p "${agent_dir}" "${log_dir}" "${app_contents}/MacOS"
 
@@ -56,17 +69,22 @@ if [[ ! -x "${app_executable}" \
   /usr/bin/codesign --force --sign - --timestamp=none "${app_path}" >/dev/null
 fi
 
-# 현재 프로젝트 절대경로와 공개 SMB 위치만 plist에 기록한다. 비밀번호는 기록하지 않는다.
-/usr/bin/sed \
-  -e "s|__PROJECT_ROOT__|${project_root}|g" \
-  -e "s|__HOME__|${HOME}|g" \
-  -e "s|__APP_EXECUTABLE__|${app_executable}|g" \
-  -e "s|__RUNTIME_PATH__|${runtime_path}|g" \
-  -e "s|__SMB_HOST__|${smb_host}|g" \
-  -e "s|__SMB_URL__|${smb_url}|g" \
-  -e "s|__MOUNT_POINT__|${mount_point}|g" \
-  -e "s|__STORAGE_ROOT__|${storage_root}|g" \
-  "${template_path}" > "${plist_path}"
+# plistlib이 특수문자를 XML 규칙에 맞게 직렬화하므로 셸 문자열 치환을 사용하지 않는다.
+"${python_bin}" -m upload_service.macos_runtime render-plist \
+  --template "${template_path}" \
+  --output "${plist_path}" \
+  --app-executable "${app_executable}" \
+  --supervisor-script "${project_root}/scripts/supervise-service.sh" \
+  --project-root "${project_root}" \
+  --runtime-path "${runtime_path}" \
+  --smb-host "${smb_host}" \
+  --smb-url "${smb_url}" \
+  --mount-point "${mount_point}" \
+  --storage-root "${storage_root}" \
+  --upload-host "${upload_host}" \
+  --upload-port "${upload_port}" \
+  --stdout-path "${log_dir}/service.log" \
+  --stderr-path "${log_dir}/service-error.log"
 
 /usr/bin/plutil -lint "${plist_path}" >/dev/null
 chmod 600 "${plist_path}"
