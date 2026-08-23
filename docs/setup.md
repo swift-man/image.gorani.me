@@ -98,6 +98,8 @@ The installer also builds and ad-hoc signs `~/Applications/GoraniImageUpload.app
 
 The supervisor waits for `DESKTOP-0217PLD:445`, asks Finder to mount `smb://ksj@DESKTOP-0217PLD/gorani-images`, verifies the exact SMB mount, and then starts the upload service. If Windows or the network disconnects, it stops the service and retries until storage is available again.
 
+The installer uses `IMAGE_STORAGE_ROOT` from `.env` by default. Set `GORANI_LAUNCHD_STORAGE_ROOT` only when this Mac needs an explicit LaunchAgent-specific override. Finder mount requests use exponential backoff from 10 seconds up to 5 minutes to avoid repeated authentication prompts.
+
 Operational commands:
 
 ```bash

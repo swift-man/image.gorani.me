@@ -138,6 +138,10 @@ def render_launch_agent(
         config: Dict[str, Any] = plistlib.load(handle)
 
     smb_host = smb_host_from_url(values["smb_url"])
+    lexical_mount = Path(os.path.abspath(values["mount_point"]))
+    lexical_storage = Path(os.path.abspath(values["storage_root"]))
+    if not _is_same_or_child(lexical_mount, lexical_storage):
+        raise ValueError("Storage root must be inside the SMB mount point")
     config["ProgramArguments"] = [
         values["app_executable"],
         values["supervisor_script"],

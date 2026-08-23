@@ -10,6 +10,7 @@ mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
 storage_root="${IMAGE_STORAGE_ROOT:-${mount_point}/image-store}"
 retry_seconds="${GORANI_RETRY_SECONDS:-10}"
 check_seconds="${GORANI_CHECK_SECONDS:-5}"
+mount_retry_max_seconds="${GORANI_MOUNT_RETRY_MAX_SECONDS:-300}"
 terminate_seconds="${GORANI_TERMINATE_SECONDS:-10}"
 kill_seconds="${GORANI_KILL_SECONDS:-5}"
 python_bin="${project_root}/.venv/bin/python"
@@ -76,17 +77,29 @@ shutdown() {
 }
 
 wait_for_storage() {
+  local mount_retry_seconds="${retry_seconds}"
+  local next_mount_attempt=0
+
   while true; do
     if is_storage_ready; then
       return
     fi
 
     if is_smb_host_ready; then
-      log "SMB 공유 연결을 요청합니다: ${smb_url}"
-      # Finder가 키체인에 저장된 자격 증명으로 /Volumes 아래에 공유를 연결한다.
-      /usr/bin/open "${smb_url}" >/dev/null 2>&1 || true
+      if ((SECONDS >= next_mount_attempt)); then
+        log "SMB 공유 연결을 요청합니다: ${smb_url}"
+        # 인증 문제가 있어도 화면을 반복 점유하지 않도록 백그라운드에서 지수 백오프로 요청한다.
+        /usr/bin/open -g "${smb_url}" >/dev/null 2>&1 || true
+        next_mount_attempt=$((SECONDS + mount_retry_seconds))
+        mount_retry_seconds=$((mount_retry_seconds * 2))
+        if ((mount_retry_seconds > mount_retry_max_seconds)); then
+          mount_retry_seconds="${mount_retry_max_seconds}"
+        fi
+      fi
     else
       log "Windows SMB 서버를 기다립니다: ${smb_host}:445"
+      mount_retry_seconds="${retry_seconds}"
+      next_mount_attempt=0
     fi
     /bin/sleep "${retry_seconds}"
   done

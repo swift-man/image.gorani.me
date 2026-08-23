@@ -20,7 +20,6 @@ app_executable="${app_contents}/MacOS/GoraniImageUpload"
 
 smb_url="${GORANI_SMB_URL:-smb://ksj@DESKTOP-0217PLD/gorani-images}"
 mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
-storage_root="${GORANI_LAUNCHD_STORAGE_ROOT:-${mount_point}/image-store}"
 psql_bin="$(command -v psql 2>/dev/null || true)"
 python_bin="${project_root}/.venv/bin/python"
 
@@ -59,9 +58,11 @@ from upload_service.config import load_settings
 settings = load_settings()
 print(settings.host)
 print(settings.port)
+print(settings.storage_root)
 ')}")
 upload_host="${GORANI_LAUNCHD_UPLOAD_HOST:-${settings_lines[1]}}"
 upload_port="${GORANI_LAUNCHD_UPLOAD_PORT:-${settings_lines[2]}}"
+storage_root="${GORANI_LAUNCHD_STORAGE_ROOT:-${settings_lines[3]}}"
 
 mkdir -p "${agent_dir}" "${log_dir}" "${app_contents}/MacOS"
 

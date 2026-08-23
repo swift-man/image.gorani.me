@@ -84,6 +84,26 @@ class LaunchAgentAssetTests(unittest.TestCase):
             self.assertNotIn("smb_password", contents, path.name)
             self.assertNotIn("ksj:", contents, path.name)
 
+    def test_installer_uses_service_storage_with_an_explicit_override(self) -> None:
+        installer = (PROJECT_ROOT / "scripts" / "install-launch-agent.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("print(settings.storage_root)", installer)
+        self.assertIn(
+            'storage_root="${GORANI_LAUNCHD_STORAGE_ROOT:-${settings_lines[3]}}"',
+            installer,
+        )
+
+    def test_supervisor_backs_off_finder_mount_requests(self) -> None:
+        supervisor = (PROJECT_ROOT / "scripts" / "supervise-service.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('mount_retry_max_seconds="${GORANI_MOUNT_RETRY_MAX_SECONDS:-300}"', supervisor)
+        self.assertIn('/usr/bin/open -g "${smb_url}"', supervisor)
+        self.assertIn("mount_retry_seconds=$((mount_retry_seconds * 2))", supervisor)
+
     def test_app_declares_network_volume_usage(self) -> None:
         info_path = PROJECT_ROOT / "launchd" / "GoraniImageUpload-Info.plist"
         info = plistlib.loads(info_path.read_bytes())
@@ -210,6 +230,29 @@ class LaunchAgentAssetTests(unittest.TestCase):
             }
 
             with self.assertRaisesRegex(ValueError, "must not include a password"):
+                render_launch_agent(template_path, output_path, values)
+
+            self.assertFalse(output_path.exists())
+
+    def test_plist_renderer_rejects_storage_outside_the_mount(self) -> None:
+        template_path = PROJECT_ROOT / "launchd" / f"{LABEL}.plist.template"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "agent.plist"
+            values = {
+                "app_executable": "/tmp/GoraniImageUpload",
+                "supervisor_script": "/tmp/supervise-service.sh",
+                "project_root": str(PROJECT_ROOT),
+                "runtime_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "smb_url": "smb://user@DESKTOP-0217PLD/gorani-images",
+                "mount_point": "/Volumes/gorani-images",
+                "storage_root": "/Volumes/other/image-store",
+                "upload_host": "127.0.0.1",
+                "upload_port": "8080",
+                "stdout_path": "/tmp/service.log",
+                "stderr_path": "/tmp/service-error.log",
+            }
+
+            with self.assertRaisesRegex(ValueError, "inside the SMB mount point"):
                 render_launch_agent(template_path, output_path, values)
 
             self.assertFalse(output_path.exists())

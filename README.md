@@ -251,6 +251,8 @@ SMB 주소에는 비밀번호를 포함하지 마세요. `smb://사용자:비밀
 
 `restart-service.sh`는 재시작 요청만 보내고 끝나지 않습니다. 최대 30초 동안 `/healthz` 성공을 기다린 뒤 SMB, LaunchAgent, HTTP 상태와 최근 서비스 로그를 출력합니다. 제한시간 안에 복구되지 않으면 최근 오류 로그를 보여주고 종료 코드 `1`을 반환합니다.
 
+LaunchAgent 설치 시 저장소는 `.env`의 `IMAGE_STORAGE_ROOT`를 사용합니다. 해당 Mac에서만 다른 경로가 필요하면 설치 명령에 `GORANI_LAUNCHD_STORAGE_ROOT`를 지정할 수 있습니다. SMB 인증에 실패한 경우 Finder 연결 요청은 10초부터 최대 5분까지 지수 백오프로 재시도해 반복 팝업과 포커스 방해를 줄입니다.
+
 LaunchAgent는 다음 순서로 동작합니다.
 
 1. Windows의 `DESKTOP-0217PLD:445`가 열릴 때까지 기다립니다.
