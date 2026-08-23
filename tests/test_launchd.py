@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from upload_service import __version__
 from upload_service.macos_runtime import (
     check_storage,
     mount_matches,
@@ -25,23 +26,25 @@ class LaunchAgentAssetTests(unittest.TestCase):
         template_path = PROJECT_ROOT / "launchd" / f"{LABEL}.plist.template"
         with tempfile.TemporaryDirectory() as temp_dir:
             output_path = Path(temp_dir) / "agent.plist"
-            render_launch_agent(
-                template_path,
-                output_path,
-                {
-                    "app_executable": "/tmp/home/Applications/A&B.app/Contents/MacOS/App",
-                    "supervisor_script": "/tmp/image|gorani/scripts/supervise.sh",
-                    "project_root": "/tmp/image<gorani>",
-                    "runtime_path": "/opt/homebrew/bin:/usr/bin:/bin",
-                    "smb_url": "smb://ksj@DESKTOP-0217PLD/gorani&images",
-                    "mount_point": "/Volumes/gorani<images>",
-                    "storage_root": "/Volumes/gorani<images>/image-store",
-                    "upload_host": "127.0.0.1",
-                    "upload_port": "8090",
-                    "stdout_path": "/tmp/logs/service&out.log",
-                    "stderr_path": "/tmp/logs/service<error>.log",
-                },
-            )
+            with patch("upload_service.macos_runtime.os.fsync") as fsync:
+                render_launch_agent(
+                    template_path,
+                    output_path,
+                    {
+                        "app_executable": "/tmp/home/Applications/A&B.app/Contents/MacOS/App",
+                        "supervisor_script": "/tmp/image|gorani/scripts/supervise.sh",
+                        "project_root": "/tmp/image<gorani>",
+                        "runtime_path": "/opt/homebrew/bin:/usr/bin:/bin",
+                        "smb_url": "smb://ksj@DESKTOP-0217PLD/gorani&images",
+                        "mount_point": "/Volumes/gorani<images>",
+                        "storage_root": "/Volumes/gorani<images>/image-store",
+                        "upload_host": "127.0.0.1",
+                        "upload_port": "8090",
+                        "stdout_path": "/tmp/logs/service&out.log",
+                        "stderr_path": "/tmp/logs/service<error>.log",
+                    },
+                )
+                fsync.assert_called_once()
             config = plistlib.loads(output_path.read_bytes())
 
         self.assertEqual(config["Label"], LABEL)
@@ -86,6 +89,11 @@ class LaunchAgentAssetTests(unittest.TestCase):
         info = plistlib.loads(info_path.read_bytes())
 
         self.assertEqual(info["CFBundleIdentifier"], LABEL)
+        self.assertEqual(info["CFBundleShortVersionString"], __version__)
+        self.assertEqual(
+            (PROJECT_ROOT / "VERSION.txt").read_text(encoding="utf-8").strip(),
+            __version__,
+        )
         self.assertTrue(info["LSUIElement"])
         self.assertIn("NSNetworkVolumesUsageDescription", info)
         self.assertIn("NSLocalNetworkUsageDescription", info)

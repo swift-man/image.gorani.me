@@ -166,6 +166,8 @@ def render_launch_agent(
         ) as temp_file:
             temp_path = Path(temp_file.name)
             plistlib.dump(config, temp_file, fmt=plistlib.FMT_XML, sort_keys=False)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
         os.replace(temp_path, output_path)
     finally:
         if temp_path is not None:
