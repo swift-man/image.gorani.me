@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>ko</string>
+  <key>CFBundleExecutable</key>
+  <string>GoraniImageUpload</string>
+  <key>CFBundleIdentifier</key>
+  <string>me.gorani.image-upload</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Gorani Image Upload</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.2.0</string>
+  <key>CFBundleVersion</key>
+  <string>2</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.0</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>업로드한 이미지를 Windows SMB 공유폴더에 저장하기 위해 네트워크 볼륨 접근이 필요합니다.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Windows 이미지 저장 서버의 SMB 연결 상태를 확인하기 위해 로컬 네트워크 접근이 필요합니다.</string>
+</dict>
+</plist>

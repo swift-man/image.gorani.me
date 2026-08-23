@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>me.gorani.image-upload</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/GoraniImageUpload.app/Contents/MacOS/GoraniImageUpload</string>
+    <string>/path/to/scripts/supervise-service.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/image.gorani.me</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>GORANI_SMB_HOST</key>
+    <string>DESKTOP-0217PLD</string>
+    <key>GORANI_SMB_URL</key>
+    <string>smb://user@DESKTOP-0217PLD/gorani-images</string>
+    <key>GORANI_SMB_MOUNT_POINT</key>
+    <string>/Volumes/gorani-images</string>
+    <key>IMAGE_STORAGE_ROOT</key>
+    <string>/Volumes/gorani-images/image-store</string>
+    <key>IMAGE_UPLOAD_HOST</key>
+    <string>127.0.0.1</string>
+    <key>IMAGE_UPLOAD_PORT</key>
+    <string>8080</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/user/Library/Logs/gorani-image-upload/service.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/user/Library/Logs/gorani-image-upload/service-error.log</string>
+</dict>
+</plist>

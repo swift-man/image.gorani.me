@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 
 from python_multipart.exceptions import MultipartParseError
 
-from upload_service import storage
+from upload_service import __version__, storage
 from upload_service import image_ops
 from upload_service.config import Settings
 from upload_service.db import (
@@ -42,6 +42,11 @@ from upload_service.server import (
     UploadHTTPServer,
 )
 from upload_service.storage import StoredAsset
+
+
+class VersionContractTests(unittest.TestCase):
+    def test_http_server_header_uses_the_release_version(self) -> None:
+        self.assertEqual(UploadHandler.server_version, f"image-upload/{__version__}")
 
 
 def make_settings(storage_root: Path, *, require_storage_mount: bool) -> Settings:

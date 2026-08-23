@@ -15,6 +15,7 @@ from python_multipart import parse_form
 from python_multipart.exceptions import FormParserError
 from python_multipart.multipart import File
 
+from . import __version__
 from .config import Settings, load_settings
 from .db import Database
 from .errors import ServiceTimeoutError, UploadTooLargeError
@@ -374,7 +375,7 @@ class UploadRequest:
 
 
 class UploadHandler(BaseHTTPRequestHandler):
-    server_version = "image-upload/0.1"
+    server_version = f"image-upload/{__version__}"
 
     def do_GET(self) -> None:
         # healthz와 자산 조회는 GET으로 제공한다.
