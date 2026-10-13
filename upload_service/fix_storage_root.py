@@ -24,24 +24,24 @@ def update_storage_root(database: Database, old_root: str, new_root: str) -> Non
 BEGIN;
 DO $$
 BEGIN
-    IF to_regclass('assets') IS NULL
-       OR to_regclass('asset_variants') IS NULL
-       OR to_regclass('pending_file_deletions') IS NULL THEN
+    IF to_regclass('public.assets') IS NULL
+       OR to_regclass('public.asset_variants') IS NULL
+       OR to_regclass('public.pending_file_deletions') IS NULL THEN
         RAISE EXCEPTION 'image metadata tables do not exist in the selected database';
     END IF;
 END
 $$;
 
-UPDATE assets
+UPDATE public.assets
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 
-UPDATE asset_variants
+UPDATE public.asset_variants
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 
 -- 아직 처리하지 않은 삭제 항목도 새 마운트 경로를 사용해야 실제 파일을 지울 수 있다.
-UPDATE pending_file_deletions
+UPDATE public.pending_file_deletions
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE completed_at IS NULL
   AND left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';

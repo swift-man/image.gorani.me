@@ -163,6 +163,8 @@ mkdir -p /Volumes/gorani-images/image-store/variants
 export PGDATABASE=postgres
 ```
 
+메타데이터 표는 `public` 스키마에 둡니다. 서비스가 보내는 모든 SQL과 `sql/schema.sql`은 첫 문장에서 `search_path`를 `pg_catalog, pg_temp`로 고정하고 표를 `public.`으로 씁니다. `public`에 함수·연산자를 만들 수 있는 다른 역할이 심은 오버로드가 서비스의 DB 권한으로 실행되지 않게 하기 위해서입니다.
+
 기존 DB에 잘못된 경로가 이미 저장되어 있다면 아래 스크립트로 한 번에 정리할 수 있습니다.
 이 명령은 프로젝트 `.env`를 읽으며, `DATABASE_URL` 또는 `PGDATABASE`로 대상을 명시해야 실행됩니다.
 
@@ -295,6 +297,8 @@ Listening on http://127.0.0.1:8080
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+`tests/test_db_search_path.py`는 `initdb`·`pg_ctl`·`psql`이 있으면 `/tmp` 아래에 임시 PostgreSQL 클러스터를 띄워 실제 SQL을 실행합니다. TCP를 열지 않고 전용 소켓 디렉터리와 포트로만 접속하며, 세 실행 파일이 없으면 건너뜁니다.
 
 ### 기본 포트 변경
 

@@ -4,6 +4,16 @@
 
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 참고하고, 버전 번호는 [Semantic Versioning](https://semver.org/lang/ko/) 흐름을 따릅니다.
 
+## [Unreleased]
+
+### Security
+
+- 서비스가 PostgreSQL에 보내는 모든 SQL과 `sql/schema.sql`이 첫 문장에서 `search_path`를 `pg_catalog, pg_temp`로 고정하고 표를 `public.`으로 쓰도록 바꿨습니다. `public`에 함수·연산자를 만들 수 있는 역할이 심은 오버로드(`=(character, text)`, `convert_from(bytea, text)`, `json_build_object`, `json_agg`)가 서비스의 DB 권한으로 실행되던 문제를 막습니다. 저장 경로 보정 명령(`scripts/fix-storage-root.sh`)도 같은 고정을 거칩니다.
+
+### Changed
+
+- `psql`을 `-q`로 실행해 고정 문장의 `SET`과 `BEGIN`·`UPDATE` 같은 명령 태그가 조회 결과에 섞이지 않게 했습니다.
+
 ## [0.2.0] - 2026-08-23
 
 ### Added
