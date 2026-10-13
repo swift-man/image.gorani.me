@@ -19,29 +19,32 @@ def update_storage_root(database: Database, old_root: str, new_root: str) -> Non
 
     old_literal = _sql_literal(old_root)
     new_literal = _sql_literal(new_root)
+    # run_sql 이 첫 문장에 search_path 고정을 붙인다. 그래서 테이블은 public. 으로 가리키고, to_regclass 의 이름
+    # 인자도 public. 을 붙인다. 고정한 경로에는 public 이 없어 'assets' 만 넘기면 NULL 이 되어 아래 검사가 잘못
+    # 실패한다.
     database.run_sql(
         f"""
 BEGIN;
 DO $$
 BEGIN
-    IF to_regclass('assets') IS NULL
-       OR to_regclass('asset_variants') IS NULL
-       OR to_regclass('pending_file_deletions') IS NULL THEN
+    IF to_regclass('public.assets') IS NULL
+       OR to_regclass('public.asset_variants') IS NULL
+       OR to_regclass('public.pending_file_deletions') IS NULL THEN
         RAISE EXCEPTION 'image metadata tables do not exist in the selected database';
     END IF;
 END
 $$;
 
-UPDATE assets
+UPDATE public.assets
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 
-UPDATE asset_variants
+UPDATE public.asset_variants
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';
 
 -- 아직 처리하지 않은 삭제 항목도 새 마운트 경로를 사용해야 실제 파일을 지울 수 있다.
-UPDATE pending_file_deletions
+UPDATE public.pending_file_deletions
 SET storage_path = {new_literal} || substr(storage_path, length({old_literal}) + 1)
 WHERE completed_at IS NULL
   AND left(storage_path, length({old_literal}) + 1) = {old_literal} || '/';

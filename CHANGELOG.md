@@ -4,6 +4,12 @@
 
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 참고하고, 버전 번호는 [Semantic Versioning](https://semver.org/lang/ko/) 흐름을 따릅니다.
 
+## [Unreleased]
+
+### Security
+
+- 서비스가 `psql`로 보내는 모든 SQL이 첫 문장에서 `search_path`를 `pg_catalog, pg_temp`로 고정하고(plain `SET`), 테이블을 `public.`으로 가리키도록 했습니다. `public` 스키마에 함수·연산자를 만들 수 있는 역할(예: DB 마이그레이션 역할)이 심은 형변환 오버로드(`convert_from(bytea, text)`, `=(character, text)` 등)가, 슈퍼유저로 접속한 이 서비스의 SQL을 가로채 그 권한으로 실행되지 못하게 합니다. `psql`은 `-q`로 호출해 고정 문장의 명령 태그가 파싱 대상 출력에 섞이지 않게 했습니다. (`sql/schema.sql`, `upload_service/db.py`, `upload_service/fix_storage_root.py`)
+
 ## [0.2.0] - 2026-08-23
 
 ### Added

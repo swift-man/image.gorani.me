@@ -12,6 +12,14 @@ from .config import PostgreSQLSettings, Settings
 from .errors import DatabaseTimeoutError
 
 
+# 서비스가 psql 로 보내는 모든 SQL 의 첫 문장. API migration 역할은 schema public 에 함수·연산자를 만들 수 있다.
+# 고정하지 않으면 형변환이 필요한 호출(_sql_literal 의 convert_from(bytea, 'UTF8'), find_asset 의 char(64) = text
+# 비교 등)을 타입이 정확히 맞는 그 역할의 오버로드가 가로채, 이 psql 을 돌린 역할(운영은 슈퍼유저)의 권한으로 돈다.
+# public 을 search_path 에서 빼면 그 오버로드는 qualification 없는 호출의 후보가 되지 못한다. 대신 테이블은
+# public. 으로 가리킨다. plain SET 이라(LOCAL 아님) 같은 -c 의 BEGIN…COMMIT 안과 그 뒤 문장까지 세션에 남는다.
+SEARCH_PATH_PIN = "SET search_path = pg_catalog, pg_temp;"
+
+
 def _sql_literal(value: object) -> str:
     # 문자열은 UTF-8 16진수로 인코딩해 SQL 구문 문자가 데이터 경계를 벗어나지 못하게 한다.
     if value is None:
@@ -134,8 +142,9 @@ class Database:
 
     def run_sql(self, sql: str) -> str:
         # stdout만 반환해서 단순 조회/업데이트 공통 경로로 재사용한다.
+        # 모든 문장 앞에 search_path 를 고정하고 -q 로 돌려, 고정 문장의 SET 태그가 파싱 대상 출력에 섞이지 않게 한다.
         completed = self._run_psql(
-            self._psql_base_command() + ["-c", sql],
+            self._psql_base_command() + ["-q", "-c", f"{SEARCH_PATH_PIN}\n{sql}"],
             "Database command",
         )
         return completed.stdout.strip()
@@ -168,8 +177,9 @@ class Database:
 
     def apply_schema(self, schema_path: Path) -> None:
         # 서버 시작 시 필요한 테이블이 없으면 자동 생성한다.
+        # schema.sql 은 첫 문장에서 search_path 를 고정하고 객체를 public. 으로 만든다. -q 로 명령 태그 출력을 줄인다.
         self._run_psql(
-            self._psql_base_command() + ["-f", str(schema_path)],
+            self._psql_base_command() + ["-q", "-f", str(schema_path)],
             "Database schema command",
         )
 
@@ -209,12 +219,12 @@ class Database:
 , variant_input (kind, format, width, height, byte_size, storage_path, public_url) AS (
     {variant_source}
 ), queued_variant_files AS (
-    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    INSERT INTO public.pending_file_deletions (storage_path, asset_sha256, reason)
     SELECT
         current_variant.storage_path,
         inserted.sha256,
         'variant_replaced'
-    FROM asset_variants current_variant
+    FROM public.asset_variants current_variant
     JOIN inserted ON inserted.id = current_variant.asset_id
     JOIN variant_input ON variant_input.kind = current_variant.kind
     WHERE current_variant.deleted_at IS NULL
@@ -227,12 +237,12 @@ class Database:
         completed_at = NULL
     RETURNING id
 ), queued_removed_variant_files AS (
-    INSERT INTO pending_file_deletions (storage_path, asset_sha256, reason)
+    INSERT INTO public.pending_file_deletions (storage_path, asset_sha256, reason)
     SELECT
         current_variant.storage_path,
         inserted.sha256,
         'variant_removed'
-    FROM asset_variants current_variant
+    FROM public.asset_variants current_variant
     JOIN inserted ON inserted.id = current_variant.asset_id
     WHERE current_variant.deleted_at IS NULL
       AND NOT EXISTS (
@@ -248,7 +258,7 @@ class Database:
         completed_at = NULL
     RETURNING id
 ), retired_variants AS (
-    UPDATE asset_variants current_variant
+    UPDATE public.asset_variants current_variant
     SET deleted_at = NOW()
     FROM inserted
     WHERE current_variant.asset_id = inserted.id
@@ -260,7 +270,7 @@ class Database:
       )
     RETURNING current_variant.id
 ), upserted_variants AS (
-    INSERT INTO asset_variants (
+    INSERT INTO public.asset_variants (
         asset_id, kind, format, width, height, byte_size, storage_path, public_url
     )
     SELECT
@@ -296,7 +306,7 @@ CROSS JOIN (SELECT COUNT(*) FROM retired_variants) retired_files
         # 같은 해시가 다시 들어오면 기존 레코드를 active 상태로 되살린다.
         sql = f"""
 WITH inserted AS (
-    INSERT INTO assets (
+    INSERT INTO public.assets (
         sha256, original_filename, content_type, file_ext, byte_size, width, height, storage_path, public_url
     ) VALUES (
         {_sql_literal(asset.sha256)},
@@ -360,13 +370,13 @@ SELECT json_build_object(
                 )
                 ORDER BY v.width
             )
-            FROM asset_variants v
+            FROM public.asset_variants v
             WHERE v.asset_id = a.id AND v.deleted_at IS NULL
         ),
         '[]'::json
     )
 )
-FROM assets a
+FROM public.assets a
 WHERE a.sha256 = {_sql_literal(sha256)}
 LIMIT 1;
 """
@@ -408,17 +418,17 @@ SELECT COALESCE(
 )
 FROM (
     SELECT queue.id, queue.storage_path, queue.asset_sha256
-    FROM pending_file_deletions queue
+    FROM public.pending_file_deletions queue
     WHERE queue.completed_at IS NULL
       AND NOT EXISTS (
           SELECT 1
-          FROM assets asset
+          FROM public.assets asset
           WHERE asset.storage_path = queue.storage_path
             AND asset.status <> 'deleted'
       )
       AND NOT EXISTS (
           SELECT 1
-          FROM asset_variants variant
+          FROM public.asset_variants variant
           WHERE variant.storage_path = queue.storage_path
             AND variant.deleted_at IS NULL
       )
@@ -435,18 +445,18 @@ FROM (
         sql = f"""
 SELECT EXISTS (
     SELECT 1
-    FROM pending_file_deletions queue
+    FROM public.pending_file_deletions queue
     WHERE queue.id = {_sql_literal(deletion_id)}
       AND queue.completed_at IS NULL
       AND NOT EXISTS (
           SELECT 1
-          FROM assets asset
+          FROM public.assets asset
           WHERE asset.storage_path = queue.storage_path
             AND asset.status <> 'deleted'
       )
       AND NOT EXISTS (
           SELECT 1
-          FROM asset_variants variant
+          FROM public.asset_variants variant
           WHERE variant.storage_path = queue.storage_path
             AND variant.deleted_at IS NULL
       )
@@ -456,7 +466,7 @@ SELECT EXISTS (
 
     def mark_file_deletion_completed(self, deletion_id: int) -> None:
         sql = f"""
-UPDATE pending_file_deletions
+UPDATE public.pending_file_deletions
 SET completed_at = NOW()
 WHERE id = {_sql_literal(deletion_id)};
 """
@@ -465,7 +475,7 @@ WHERE id = {_sql_literal(deletion_id)};
     def mark_deleting(self, sha256: str) -> None:
         # 파일 작업 전에 중간 상태를 남겨 프로세스가 중단되어도 삭제를 재시도할 수 있게 한다.
         sql = f"""
-UPDATE assets
+UPDATE public.assets
 SET status = 'deleting'
 WHERE sha256 = {_sql_literal(sha256)}
   AND status IN ('active', 'deleting');
@@ -476,11 +486,11 @@ WHERE sha256 = {_sql_literal(sha256)}
         # 파일 삭제 이후 DB 상태를 deleted로 바꾸고 deleted_at도 기록한다.
         sql = f"""
 BEGIN;
-UPDATE asset_variants
+UPDATE public.asset_variants
 SET deleted_at = NOW()
-WHERE asset_id = (SELECT id FROM assets WHERE sha256 = {_sql_literal(sha256)});
+WHERE asset_id = (SELECT id FROM public.assets WHERE sha256 = {_sql_literal(sha256)});
 
-UPDATE assets
+UPDATE public.assets
 SET status = 'deleted', deleted_at = NOW()
 WHERE sha256 = {_sql_literal(sha256)};
 COMMIT;

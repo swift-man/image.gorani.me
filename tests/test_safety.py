@@ -813,10 +813,13 @@ class DatabaseSafetyTests(unittest.TestCase):
         database.run_sql.assert_called_once()
         sql = database.run_sql.call_args.args[0]
         self.assertIn("BEGIN;", sql)
-        self.assertIn("to_regclass('assets')", sql)
-        self.assertIn("to_regclass('asset_variants')", sql)
-        self.assertIn("to_regclass('pending_file_deletions')", sql)
-        self.assertIn("UPDATE pending_file_deletions", sql)
+        # 고정한 search_path 에는 public 이 없으므로 to_regclass 의 이름 인자와 테이블을 모두 public. 으로 가리킨다.
+        self.assertIn("to_regclass('public.assets')", sql)
+        self.assertIn("to_regclass('public.asset_variants')", sql)
+        self.assertIn("to_regclass('public.pending_file_deletions')", sql)
+        self.assertIn("UPDATE public.assets", sql)
+        self.assertIn("UPDATE public.asset_variants", sql)
+        self.assertIn("UPDATE public.pending_file_deletions", sql)
         self.assertIn("WHERE completed_at IS NULL", sql)
         self.assertIn("COMMIT;", sql)
         self.assertNotIn("ksj's_%_root", sql)

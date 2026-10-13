@@ -105,6 +105,12 @@ Avoid on-demand thumbnail generation in this service unless explicitly designed 
 - design for orphan cleanup and retry after partial failure
 - keep public delivery concerns out of this codebase unless needed for coordination
 
+## Database Access Rules
+
+- 서비스가 `psql`로 보내는 모든 SQL은 첫 문장을 `SET search_path = pg_catalog, pg_temp;`(plain `SET`, `LOCAL` 아님)로 시작하고, 테이블과 비-`pg_catalog` 객체를 `public.`으로 가리킨다. `public` 스키마에 CREATE 권한을 가진 역할이 심은 형변환 오버로드가, 운영에서 슈퍼유저로 접속하는 이 서비스의 SQL을 가로채 그 권한으로 실행되지 못하게 하기 위함이다. `public`을 `search_path`에서 빼면 그 오버로드는 qualification 없는 호출의 후보가 되지 못한다.
+- `psql`은 `-q`로 호출한다. 고정 문장의 `SET` 명령 태그가 `-At` 파싱 대상 출력 앞에 섞이지 않게 하기 위함이다.
+- 새 SQL을 추가하면 같은 규칙을 지키고, `tests/test_search_path_pin.py`를 실행한다. 이 파일은 각 메서드의 qualification을 확인하고, 폐기용 PostgreSQL 클러스터에서 `public`에 CREATE만 있는 역할이 심은 오버로드를 고정 없는 대조는 슈퍼유저로 부르고 실제 코드는 하나도 부르지 않음을 증명한다.
+
 ## Agent Response Rules
 
 - 코드가 변경되었다면 최종 응답에 재실행 명령어를 함께 안내한다.
