@@ -62,6 +62,12 @@ Expected metadata areas:
 - deletion state
 - variant records and their dimensions, format, and path
 
+SQL rules:
+- every statement sent to PostgreSQL starts with `SET search_path = pg_catalog, pg_temp;` (`Database.run_sql` adds it, `sql/schema.sql` starts with it) and names tables as `public.<table>`
+- otherwise a role that can create objects in `public` can plant an exact-type overload (for example `public.=(character, text)` for the `char(64) = text` hash lookup, or `public.convert_from(bytea, text)` for every string literal) that runs with the service's database role, which may be a superuser
+- use plain `SET`, not `SET LOCAL`; `run_sql` passes `-q` so the `SET` tag does not appear in query output
+- when SQL adds a call that needs an implicit cast or matches a polymorphic or `"any"` signature, add an overload aimed at it to the control in `tests/test_db_search_path.py`
+
 ## Cache Expectations
 
 Caching is primarily owned by the Nginx delivery server and downstream clients.

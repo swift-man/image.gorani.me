@@ -132,6 +132,8 @@ The app auto-applies [`schema.sql`](../sql/schema.sql) on startup.
 
 It currently talks to PostgreSQL via the `psql` CLI, which keeps the project dependency-light for now.
 
+The metadata tables live in the `public` schema. Every statement the service sends, and `schema.sql` itself, starts with `SET search_path = pg_catalog, pg_temp;` and names tables as `public.<table>`, so functions or operators that another role creates in `public` cannot run with the service's database role.
+
 If older rows were stored under the wrong macOS mount path, fix them with:
 
 ```bash
