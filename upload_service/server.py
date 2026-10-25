@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import socket
 import threading
 from contextlib import contextmanager
@@ -381,7 +382,7 @@ class UploadHandler(BaseHTTPRequestHandler):
         # healthz와 자산 조회는 GET으로 제공한다.
         request = UploadRequest(self, self.server.app)
         if request.parsed.path == "/healthz":
-            self.respond(HTTPStatus.OK, {"status": "ok"})
+            self.respond(HTTPStatus.OK, {"status": "ok"}, health=True)
             return
         if request.parsed.path.startswith("/assets/"):
             sha256 = request.parsed.path.rsplit("/", 1)[-1]
@@ -419,12 +420,17 @@ class UploadHandler(BaseHTTPRequestHandler):
         # 기본 HTTP 로그는 끄고 필요 시 구조화 로깅으로 교체한다.
         return
 
-    def respond(self, status: int, payload: Dict[str, Any]) -> None:
+    def respond(self, status: int, payload: Dict[str, Any], health: bool = False) -> None:
         # 모든 응답은 JSON으로 통일해 클라이언트 처리를 단순화한다.
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if health:
+            # 기존 JSON 계약을 유지하면서 배포기가 구 프로세스의 200 응답을 구별한다.
+            self.send_header("X-Image-Release", os.environ.get("IMAGE_RELEASE_SHA", "unmanaged"))
+            self.send_header("X-Image-Pid", str(os.getpid()))
+            self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 

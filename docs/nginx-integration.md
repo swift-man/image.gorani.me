@@ -2,7 +2,20 @@
 
 This document is for the Nginx delivery project that serves files written by the `image.gorani.me` upload service.
 
-## Purpose
+## External Upload Security Coordination
+
+외부 업로드를 공개하기 전 [보안 검토](external-upload-security.md)의 체크리스트를 적용해야 합니다.
+현재 공용 API key는 업로드와 삭제를 모두 허용하므로 브라우저/Swift 앱에 전달하지 않습니다.
+우선 신뢰하는 사용자 백엔드에서만 HTTPS로 호출하고, 외부 proxy는 정확한 `POST /upload`만 허용합니다.
+`/assets/*`와 `/healthz`는 내부 관리 접근으로 제한하고, API 응답에 이미지의 immutable 캐시를 적용하지 않습니다.
+정적 파일에는 정확한 Content-Type과 `nosniff`를 사용하고 임시 파일/dotfile/목록은 노출하지 않습니다.
+
+자동 배포는 이미지 URL/저장 위치/캐시 정책을 변경하지 않습니다. `/healthz` JSON은 동일하며
+`X-Image-Release`/`X-Image-Pid` 진단 헤더와 `Cache-Control: no-store`가 추가됩니다.
+해당 경로를 공개해야 한다면 진단 헤더는 제거하세요. 업로드 서비스 재시작과 무관하게 기존 정적 이미지
+전달은 Windows 로컬 파일에서 계속됩니다. 이 문서는 계약 제안이며 Nginx 설정을 직접 적용하지 않습니다.
+
+## Service Responsibilities
 
 The upload service does not deliver public images directly.
 

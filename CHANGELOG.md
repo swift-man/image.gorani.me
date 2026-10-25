@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+### Added
+
+- main CI 성공 후 비공개 runner에 배포를 요청하는 workflow와 GitHub-hosted PR 검사를 추가했습니다.
+- macOS 로그인 시 및 5분 간격으로 최신 main을 확인하는 선택 설치형 배포기를 추가했습니다. 커밋별 가상환경, 공통 배포 잠금, SMB/DB 사전 검사, 실패 시 이전 release 복구를 지원합니다.
+- 외부 업로드의 서버 간 인증 방식과 브라우저 직접 업로드의 보안 선행 조건을 문서화했습니다. 공개 업로드 경로나 브라우저 토큰 기능을 새로 활성화하지는 않습니다.
+
 ### Security
 
 - 서비스가 PostgreSQL에 보내는 모든 SQL과 `sql/schema.sql`이 첫 문장에서 `search_path`를 `pg_catalog, pg_temp`로 고정하고 표를 `public.`으로 쓰도록 바꿨습니다. `public`에 함수·연산자를 만들 수 있는 역할이 심은 오버로드(`=(character, text)`, `convert_from(bytea, text)`, `json_build_object`, `json_agg`)가 서비스의 DB 권한으로 실행되던 문제를 막습니다. 저장 경로 보정 명령(`scripts/fix-storage-root.sh`)도 같은 고정을 거칩니다.

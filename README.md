@@ -214,6 +214,10 @@ cp .env.example .env
 
 ## 실행 방법
 
+main 병합 후 자동 배포와 로그인 시 최신 버전 복구를 원하면
+[자동 배포 설치/운영 안내](docs/auto-deployment.md)를 참고하세요. 별도 설치형이며 기존
+LaunchAgent 자동 실행과는 구분됩니다. 공개 PR 검사는 GitHub-hosted, 내부 배포는 비공개 runner를 사용합니다.
+
 ### macOS 자동 실행 설정
 
 운영용 Mac에서는 직접 Python 프로세스를 반복 실행하지 않고 LaunchAgent가 SMB 연결과 서비스를 함께 관리하도록 설정하는 것을 권장합니다.
@@ -250,6 +254,9 @@ SMB 주소에는 비밀번호를 포함하지 마세요. `smb://사용자:비밀
 # 자동 실행 제거
 ./scripts/uninstall-launch-agent.sh
 ```
+
+별도 자동 배포까지 설치했다면 제거 전에 [updater와 runner 중지/복구 절차](docs/auto-deployment.md)를
+먼저 따르세요. `uninstall-launch-agent.sh`는 서비스와 네이티브 앱만 제거하며 배포 updater는 제거하지 않습니다.
 
 `restart-service.sh`는 재시작 요청만 보내고 끝나지 않습니다. 최대 30초 동안 `/healthz` 성공을 기다린 뒤 SMB, LaunchAgent, HTTP 상태와 최근 서비스 로그를 출력합니다. 제한시간 안에 복구되지 않으면 최근 오류 로그를 보여주고 종료 코드 `1`을 반환합니다.
 
@@ -323,6 +330,9 @@ curl http://127.0.0.1:8080/healthz
 ```json
 {"status": "ok"}
 ```
+
+응답에는 `X-Image-Release`, `X-Image-Pid`, `Cache-Control: no-store`도 포함됩니다.
+일반 실행의 release 값은 `unmanaged`이며, 이 응답 자체는 DB/SMB readiness 검사가 아닙니다.
 
 ### 2. 업로드
 
@@ -448,6 +458,9 @@ add_header Cache-Control "public, max-age=31536000, immutable";
 
 ## Nginx 연동
 
+외부 사용자 업로드 공개 전에는 [외부 업로드 보안 검토](docs/external-upload-security.md)를 먼저
+확인하세요. 현재 API key를 브라우저/Swift 앱에 배포하면 안 되며, 사용자 백엔드 경유가 우선입니다.
+
 Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](docs/nginx-integration.md)에 정리되어 있습니다.
 
 핵심만 요약하면:
@@ -482,6 +495,9 @@ Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](doc
 
 - [AGENTS.md](AGENTS.md)
 - [docs/setup.md](docs/setup.md)
+- [docs/auto-deployment.md](docs/auto-deployment.md)
+- [docs/external-upload-security.md](docs/external-upload-security.md)
+- [docs/frontend-image-upload.md](docs/frontend-image-upload.md)
 - [docs/nginx-integration.md](docs/nginx-integration.md)
 - [sql/schema.sql](sql/schema.sql)
 

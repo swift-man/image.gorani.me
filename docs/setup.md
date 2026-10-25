@@ -108,6 +108,10 @@ Operational commands:
 ./scripts/uninstall-launch-agent.sh
 ```
 
+Managed main deployment is a separate opt-in installation described in [auto-deployment.md](auto-deployment.md).
+If installed, follow its updater/runner shutdown and recovery instructions before uninstalling the service.
+`uninstall-launch-agent.sh` removes the service and native app, not the deployment updater.
+
 Logs:
 
 ```text

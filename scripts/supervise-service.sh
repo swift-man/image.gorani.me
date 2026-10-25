@@ -2,8 +2,8 @@
 
 set -u
 
-script_dir="$(cd "$(dirname "$0")" && pwd)"
-project_root="$(cd "${script_dir}/.." && pwd)"
+script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+project_root="$(cd "${script_dir}/.." && pwd -P)"
 cd "${project_root}" || exit 1
 smb_url="${GORANI_SMB_URL:-smb://ksj@DESKTOP-0217PLD/gorani-images}"
 mount_point="${GORANI_SMB_MOUNT_POINT:-/Volumes/gorani-images}"
