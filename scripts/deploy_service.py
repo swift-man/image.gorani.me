@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import fcntl
 import hashlib
 import io
+import ipaddress
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -33,6 +34,32 @@ DEFAULT_ROOT = Path.home() / "Library/Application Support/gorani-image-upload/de
 # 자동 적용 중에는 DB 마이그레이션과 네이티브 앱 교체를 하지 않는다.
 GUARDED = ("sql/schema.sql", "launchd/GoraniImageUploadLauncher.swift", "scripts/deploy_service.py")
 SHA = re.compile(r"[0-9a-f]{40}")
+
+
+class DeploymentInterrupted(BaseException):
+    """네트워크 오류 처리에 흡수되지 않고 정리 경로까지 전달할 종료 신호."""
+
+
+def health_url_for_environment(environment):
+    """기존 수신 주소를 보존한다. wildcard만 로컬 검사 주소로 바꾼다."""
+    host = environment.get("IMAGE_UPLOAD_HOST", "127.0.0.1")
+    if host in {"", "0.0.0.0", "::"}:
+        host = "127.0.0.1"
+    if ":" in host:
+        try:
+            ipaddress.IPv6Address(host)
+        except ValueError:
+            raise RuntimeError("IMAGE_UPLOAD_HOST의 주소 형식이 올바르지 않습니다.") from None
+        host = f"[{host}]"
+    elif not re.fullmatch(r"[A-Za-z0-9_.-]+", host):
+        raise RuntimeError("IMAGE_UPLOAD_HOST의 주소 형식이 올바르지 않습니다.")
+    try:
+        port = int(environment["IMAGE_UPLOAD_PORT"])
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeError("IMAGE_UPLOAD_PORT는 1~65535의 정수여야 합니다.") from None
+    if not 1 <= port <= 65535:
+        raise RuntimeError("IMAGE_UPLOAD_PORT는 1~65535의 정수여야 합니다.")
+    return f"http://{host}:{port}/healthz"
 
 
 def log(message):
@@ -215,7 +242,7 @@ if Database(s).run_sql('SELECT 1;').strip() != '1':
     def healthy(self, sha, timeout=60):
         deadline = time.monotonic() + timeout
         stable_pid, stable_since = None, 0
-        # proxy 환경변수를 무시하고 이 Mac의 고정된 loopback 주소로만 검사한다.
+        # proxy 환경변수를 무시하고 설치된 서비스의 수신 주소를 검사한다.
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         while time.monotonic() < deadline:
             try:
@@ -310,12 +337,27 @@ def install(root, source):
     agent = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
     original = agent.read_bytes()
     service = plistlib.loads(original)
+    if not isinstance(service, dict):
+        raise RuntimeError("서비스 LaunchAgent plist는 dictionary 형식이어야 합니다.")
+    required = {"ProgramArguments", "EnvironmentVariables", "WorkingDirectory"}
+    missing = required - service.keys()
+    if missing:
+        raise RuntimeError("서비스 LaunchAgent 필수 키 누락: " + ", ".join(sorted(missing)))
+    arguments = service["ProgramArguments"]
+    if not isinstance(arguments, list) or not arguments or not isinstance(arguments[0], str):
+        raise RuntimeError("서비스 LaunchAgent ProgramArguments의 앱 경로가 올바르지 않습니다.")
     app = service["ProgramArguments"][0]
     if not Path(app).is_file():
         raise RuntimeError("먼저 install-launch-agent.sh로 네이티브 앱을 설치하세요.")
     environment = service["EnvironmentVariables"]
-    if not {"GORANI_SMB_URL", "GORANI_SMB_MOUNT_POINT", "IMAGE_UPLOAD_PORT"} <= environment.keys():
-        raise RuntimeError("서비스 LaunchAgent의 SMB/포트 설정이 없습니다.")
+    if not isinstance(environment, dict) or not all(
+            isinstance(key, str) and isinstance(value, str) for key, value in environment.items()):
+        raise RuntimeError("서비스 LaunchAgent EnvironmentVariables는 문자열 dictionary여야 합니다.")
+    required = {"GORANI_SMB_URL", "GORANI_SMB_MOUNT_POINT", "IMAGE_UPLOAD_PORT", "PATH"}
+    missing = {name for name in required if not environment.get(name)}
+    if missing:
+        raise RuntimeError("서비스 LaunchAgent 필수 환경변수 누락: " + ", ".join(sorted(missing)))
+    health_url = health_url_for_environment(environment)
     if service["WorkingDirectory"] != str(source):
         raise RuntimeError("현재 운영 checkout에서 설치하세요. 별도 개발 worktree는 사용할 수 없습니다.")
     updater = agent.with_name(f"{LABEL}.deploy.plist")
@@ -325,7 +367,7 @@ def install(root, source):
     config = {
         "python": str(Path(sys._base_executable).resolve()),
         "env_file": str(env_file), "environment": environment,
-        "health_url": f"http://127.0.0.1:{int(environment['IMAGE_UPLOAD_PORT'])}/healthz",
+        "health_url": health_url,
         "guarded": {name: digest(source / name) for name in GUARDED},
     }
     domain = f"gui/{os.getuid()}"
@@ -381,7 +423,7 @@ def main():
     args.root = args.root.expanduser().resolve()
     os.umask(0o077)
     def interrupted(_signum, _frame):
-        raise InterruptedError("배포 중단 요청")
+        raise DeploymentInterrupted("배포 중단 요청")
     signal.signal(signal.SIGTERM, interrupted)
     try:
         if args.command == "install":
@@ -392,6 +434,9 @@ def main():
                     clear_failed_revision(args.root)
                 else:
                     Deployer(args.root).sync()
+    except DeploymentInterrupted:
+        log("배포 중단 요청을 처리했습니다.")
+        return 128 + signal.SIGTERM
     except Exception as exc:
         log(f"자동 배포 실패: {exc}")
         return 1

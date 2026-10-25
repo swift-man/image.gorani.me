@@ -44,7 +44,7 @@
 
 이미지 1장을 업로드하면 흐름은 대략 아래 순서로 진행됩니다.
 
-1. 클라이언트가 `POST /upload`로 이미지 파일을 보냅니다.
+1. 글쓰기·어드민 화면이 자사 백엔드에 파일을 보내면 백엔드가 로그인 및 해당 작업 권한을 검사한 뒤 내부 `POST /upload`를 호출합니다.
 2. 업로드 서비스가 파일을 임시 파일로 먼저 받습니다.
 3. MIME 타입과 이미지 크기를 검사하고 SHA-256 해시를 계산합니다.
 4. 해시 기반 경로로 원본 파일을 공유폴더에 저장합니다.
@@ -458,8 +458,9 @@ add_header Cache-Control "public, max-age=31536000, immutable";
 
 ## Nginx 연동
 
-외부 사용자 업로드 공개 전에는 [외부 업로드 보안 검토](docs/external-upload-security.md)를 먼저
-확인하세요. 현재 API key를 브라우저/Swift 앱에 배포하면 안 되며, 사용자 백엔드 경유가 우선입니다.
+업로드는 **우리 서비스의 글쓰기·어드민 기능만 지원**합니다. [업로드 접근 정책](docs/external-upload-security.md)에
+따라 자사 백엔드에서 권한을 검사하고, 공개 Nginx 업로드 경로는 차단합니다. 외부용 API, 브라우저 직접
+업로드, 티켓 발급은 지원하지 않으며 API key를 브라우저/Swift 앱에 배포하지 않습니다.
 
 Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](docs/nginx-integration.md)에 정리되어 있습니다.
 

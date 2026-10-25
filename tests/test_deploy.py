@@ -15,6 +15,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 import urllib.request
+import urllib.error
 
 from upload_service.server import UploadHandler, UploadHTTPServer
 
@@ -178,6 +179,53 @@ class DeployTests(unittest.TestCase):
             with patch.object(deploy.urllib.request, "urlopen", return_value=response):
                 self.assertEqual(self.manager.ci_passed(NEW), expected)
 
+    def test_unavailable_ci_fails_without_preparing_or_switching(self):
+        for error in (urllib.error.URLError("offline"),
+                      urllib.error.HTTPError(deploy.API, 403, "rate limited", {}, None),
+                      urllib.error.HTTPError(deploy.API, 429, "rate limited", {}, None)):
+            with self.subTest(error=type(error).__name__):
+                self.manager.latest = Mock(return_value=NEW)
+                self.manager.prepare = Mock()
+                self.manager.restart = Mock()
+                with patch.object(deploy.urllib.request, "urlopen", side_effect=error), \
+                        self.assertRaises(urllib.error.URLError):
+                    self.manager.sync()
+                self.manager.prepare.assert_not_called()
+                self.manager.restart.assert_not_called()
+                self.assertEqual((self.root / "current").resolve(), self.old)
+
+    def test_listener_health_url_handles_wildcards_and_bracketed_ipv6(self):
+        for host, target in [("", "127.0.0.1"), ("0.0.0.0", "127.0.0.1"),
+                             ("::", "127.0.0.1"), ("localhost", "localhost"),
+                             ("::1", "[::1]"), ("2001:db8::15", "[2001:db8::15]")]:
+            with self.subTest(host=host):
+                self.assertEqual(deploy.health_url_for_environment({
+                    "IMAGE_UPLOAD_HOST": host, "IMAGE_UPLOAD_PORT": "8090"}),
+                    f"http://{target}:8090/healthz")
+
+    def test_listener_health_url_rejects_invalid_address_or_port(self):
+        for host, port in [("host/path", "8090"), ("host@other", "8090"), ("bad:host", "8090"),
+                           ("localhost", "0"), ("localhost", "65536"), ("localhost", "bad")]:
+            with self.subTest(host=host, port=port), self.assertRaises(RuntimeError):
+                deploy.health_url_for_environment({"IMAGE_UPLOAD_HOST": host, "IMAGE_UPLOAD_PORT": port})
+
+    def test_interrupted_activation_rolls_back_then_propagates(self):
+        self.manager.restart = Mock()
+        self.manager.healthy = Mock(side_effect=[deploy.DeploymentInterrupted(), None])
+        with self.assertRaises(deploy.DeploymentInterrupted):
+            self.manager.activate(self.new, NEW)
+        self.assertEqual((self.root / "current").resolve(), self.old)
+        self.assertFalse((self.root / "pending.json").exists())
+        self.assertEqual(json.loads((self.root / "failed.json").read_text())["sha"], NEW)
+
+    def test_interrupted_command_kills_its_process_group(self):
+        process = Mock(pid=123, returncode=-9)
+        process.communicate.side_effect = [deploy.DeploymentInterrupted(), (b"", b"")]
+        with patch.object(deploy.subprocess, "Popen", return_value=process), \
+                patch.object(deploy.os, "killpg") as killpg, self.assertRaises(deploy.DeploymentInterrupted):
+            self.manager.run(["pip", "install", "."])
+        killpg.assert_called_once_with(123, signal.SIGKILL)
+
     def test_pending_ci_keeps_service_unchanged(self):
         self.manager.latest = Mock(return_value=NEW)
         self.manager.ci_passed = Mock(return_value=False)
@@ -218,6 +266,39 @@ class DeployTests(unittest.TestCase):
                 patch.object(deploy.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "시간 초과"):
                 self.manager.healthy(NEW, timeout=10)
+
+    def test_sigterm_during_health_is_not_swallowed_as_connection_failure(self):
+        for phase in ("open", "read"):
+            with self.subTest(phase=phase):
+                opener = Mock()
+                response = Mock()
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                response.status = 200
+                response.headers = {"X-Image-Release": NEW, "X-Image-Pid": "42"}
+                opener.open.return_value = response
+
+                def interrupt(*_args, **_kwargs):
+                    registered_handler.call_args.args[1](signal.SIGTERM, None)
+
+                if phase == "open":
+                    opener.open.side_effect = interrupt
+                else:
+                    response.read.side_effect = interrupt
+                previous_umask = os.umask(0o077)
+                try:
+                    with patch.object(deploy.sys, "argv", ["deploy", "--root", str(self.root), "sync"]), \
+                            patch.object(deploy.signal, "signal") as registered_handler, \
+                            patch.object(deploy.Deployer, "sync", autospec=True,
+                                         side_effect=lambda manager: manager.healthy(NEW)), \
+                            patch.object(deploy.urllib.request, "build_opener", return_value=opener), \
+                            patch.object(deploy.time, "monotonic", side_effect=[0, 1, 100]), \
+                            patch.object(deploy.time, "sleep") as sleep:
+                        self.assertEqual(deploy.main(), 143)
+                        sleep.assert_not_called()
+                        opener.open.assert_called_once()
+                finally:
+                    os.umask(previous_umask)
 
     def test_health_headers_leave_json_contract_unchanged(self):
         server = UploadHTTPServer(("127.0.0.1", 0), UploadHandler, Mock(), 2, 3)
@@ -278,6 +359,19 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual((self.root / "config.json").stat().st_mode & 0o777, 0o600)
         self.assertNotIn("test-fixture", (self.root / "config.json").read_text())
 
+    def test_installer_health_uses_existing_specific_listener_address(self):
+        service = plistlib.loads(self.original)
+        # 문서용 주소만 사용하며 실제 네트워크/launchd에는 접근하지 않는다.
+        service["EnvironmentVariables"]["IMAGE_UPLOAD_HOST"] = "192.0.2.15"
+        self.agent.write_bytes(plistlib.dumps(service))
+        with patch.object(deploy.Path, "home", return_value=self.home), \
+                patch.object(deploy.sys, "platform", "darwin"), \
+                patch.object(deploy.Deployer, "run"), patch.object(deploy.Deployer, "healthy"):
+            deploy.install(self.root, self.source)
+        config = json.loads((self.root / "config.json").read_text())
+        self.assertEqual(config["health_url"], "http://192.0.2.15:8090/healthz")
+        self.assertEqual(config["environment"]["IMAGE_UPLOAD_HOST"], "192.0.2.15")
+
     def test_failed_updater_bootstrap_removes_plist_and_restores_original(self):
         def run(_manager, args, **_kwargs):
             if "bootstrap" in args and args[-1] == self.updater:
@@ -298,6 +392,25 @@ class InstallerTests(unittest.TestCase):
         with patch.object(deploy.sys, "platform", "darwin"), self.assertRaises(RuntimeError):
             deploy.install(self.root, self.source)
         self.assertEqual(self.agent.read_bytes(), self.original)
+
+    def test_missing_plist_fields_are_rejected_before_modifying_service(self):
+        for name in ("ProgramArguments", "EnvironmentVariables", "WorkingDirectory", "PATH"):
+            with self.subTest(name=name):
+                service = plistlib.loads(self.original)
+                if name == "PATH":
+                    del service["EnvironmentVariables"][name]
+                else:
+                    del service[name]
+                before = plistlib.dumps(service)
+                self.agent.write_bytes(before)
+                with patch.object(deploy.Path, "home", return_value=self.home), \
+                        patch.object(deploy.sys, "platform", "darwin"), \
+                        patch.object(deploy.subprocess, "Popen") as popen, \
+                        self.assertRaisesRegex(RuntimeError, name):
+                    deploy.install(self.root, self.source)
+                popen.assert_not_called()
+                self.assertFalse(self.root.exists())
+                self.assertEqual(self.agent.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,10 @@ This repository now contains a minimal upload-side service that:
 
 ## Endpoints
 
+These are internal backend/management endpoints, not a public upload API. Only the site's authenticated
+writing/editor and admin backend may upload; it must check each user's permissions. Do not expose API keys
+to browsers or shipped apps. Public Nginx/firewall access must follow [the upload policy](external-upload-security.md).
+
 ### `POST /upload`
 
 Multipart form upload with field name `image`.
