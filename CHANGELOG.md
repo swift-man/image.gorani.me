@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-25
+
+### Added
+
+- main CI 성공 후 비공개 runner에 배포를 요청하는 workflow와 GitHub-hosted PR 검사를 추가했습니다.
+- macOS 로그인 시 및 5분 간격으로 최신 main을 확인하는 선택 설치형 배포기를 추가했습니다. 커밋별 가상환경, 공통 배포 잠금, SMB/DB 사전 검사, 실패 시 이전 release 복구를 지원합니다.
+- 업로드를 자사 글쓰기·어드민의 권한 검증 백엔드 경유로 제한하는 정책을 문서화했습니다. 외부용 API, 브라우저 직접 업로드 및 티켓 기능은 지원하지 않습니다. Nginx/방화벽 접근 제한은 별도 적용이 필요합니다.
+
+### Fixed
+
+- 일시적인 HTTP 프로토콜 오류를 헬스체크에서 재시도하고, 설치 준비 실패 시 기존 서비스를 재시작하지 않도록 했습니다. 자식 프로세스 정리 대기 timeout도 최초 종료 신호를 덮지 않습니다.
+- 기존 서비스의 특정 수신 주소를 헬스체크에 반영하고, 필수 plist/PATH 누락을 서비스 변경 전에 검사합니다.
+- SIGTERM이 헬스체크의 네트워크 오류 처리에 흡수되지 않도록 전용 종료 예외를 사용하고 복구/자식 종료 회귀 시험을 추가했습니다.
+
 ### Security
 
 - 서비스가 PostgreSQL에 보내는 모든 SQL과 `sql/schema.sql`이 첫 문장에서 `search_path`를 `pg_catalog, pg_temp`로 고정하고 표를 `public.`으로 쓰도록 바꿨습니다. `public`에 함수·연산자를 만들 수 있는 역할이 심은 오버로드(`=(character, text)`, `convert_from(bytea, text)`, `json_build_object`, `json_agg`)가 서비스의 DB 권한으로 실행되던 문제를 막습니다. 저장 경로 보정 명령(`scripts/fix-storage-root.sh`)도 같은 고정을 거칩니다.

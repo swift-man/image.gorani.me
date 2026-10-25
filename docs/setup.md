@@ -12,6 +12,10 @@ This repository now contains a minimal upload-side service that:
 
 ## Endpoints
 
+These are internal backend/management endpoints, not a public upload API. Only the site's authenticated
+writing/editor and admin backend may upload; it must check each user's permissions. Do not expose API keys
+to browsers or shipped apps. Public Nginx/firewall access must follow [the upload policy](external-upload-security.md).
+
 ### `POST /upload`
 
 Multipart form upload with field name `image`.
@@ -107,6 +111,10 @@ Operational commands:
 ./scripts/restart-service.sh
 ./scripts/uninstall-launch-agent.sh
 ```
+
+Managed main deployment is a separate opt-in installation described in [auto-deployment.md](auto-deployment.md).
+If installed, follow its updater/runner shutdown and recovery instructions before uninstalling the service.
+`uninstall-launch-agent.sh` removes the service and native app, not the deployment updater.
 
 Logs:
 

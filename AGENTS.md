@@ -19,6 +19,13 @@ It is not responsible for:
 
 ## System Role
 
+Upload access policy:
+- support only uploads initiated by this service's writing/editor and admin features through its authenticated backend
+- the backend must check writing/admin permissions; never expose the image API key to browsers or shipped clients
+- do not add third-party/public upload access, browser-direct upload tickets, presigned upload URLs, or upload CORS as an alternative
+- public Nginx must deny upload/API routes; keep the upload listener reachable only by the designated backend/internal management network
+- document network enforcement as pending until the Nginx/firewall project has actually applied and verified it
+
 The delivery path is handled by an Nginx server running on a separate Windows 11 machine.
 
 The upload service writes image files into a shared folder that is also accessible to the Nginx server. Nginx serves those files directly as static assets from NTFS storage.

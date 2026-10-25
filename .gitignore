@@ -4,6 +4,9 @@
 .env.*
 !.env.example
 .venv/
+/build/
+/*.egg-info/
+/.release-sha
 .pycache/
 __pycache__/
 tmp-fixtures/

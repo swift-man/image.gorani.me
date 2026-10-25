@@ -2,7 +2,23 @@
 
 This document is for the Nginx delivery project that serves files written by the `image.gorani.me` upload service.
 
-## Purpose
+## Internal Upload Access Policy
+
+업로드는 우리 서비스의 글쓰기·어드민 페이지에서 권한을 검증한 자사 백엔드 요청만 지원합니다.
+외부 사이트·제3자·비인증 사용자용 공개 업로드 API는 지원하지 않습니다. [접근 정책](external-upload-security.md)을 적용하세요.
+현재 공용 API key는 업로드와 삭제를 모두 허용하므로 브라우저/Swift 앱에 전달하지 않습니다.
+공개 Nginx의 `/upload` 및 `/upload/` 등 업로드 API 경로는 proxy하지 말고 차단합니다.
+내부 reverse proxy가 필요하면 자사 백엔드만 접근 가능한 별도 listener/allowlist로 운영합니다.
+업로드 서비스의 원본 API 포트도 외부 접근을 차단합니다. UI의 도메인/CORS만으로 권한을 대신하지 않습니다.
+`/assets/*`와 `/healthz`는 내부 관리 접근으로 제한하고, API 응답에 이미지의 immutable 캐시를 적용하지 않습니다.
+정적 파일에는 정확한 Content-Type과 `nosniff`를 사용하고 임시 파일/dotfile/목록은 노출하지 않습니다.
+
+자동 배포는 이미지 URL/저장 위치/캐시 정책을 변경하지 않습니다. `/healthz` JSON은 동일하며
+`X-Image-Release`/`X-Image-Pid` 진단 헤더와 `Cache-Control: no-store`가 추가됩니다.
+해당 경로와 진단 헤더는 내부 관리용입니다. 업로드 서비스 재시작과 무관하게 기존 정적 이미지
+전달은 Windows 로컬 파일에서 계속됩니다. 이 문서는 확정된 접근 정책이며 Nginx 설정은 별도 적용이 필요합니다.
+
+## Service Responsibilities
 
 The upload service does not deliver public images directly.
 

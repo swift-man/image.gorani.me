@@ -44,7 +44,7 @@
 
 이미지 1장을 업로드하면 흐름은 대략 아래 순서로 진행됩니다.
 
-1. 클라이언트가 `POST /upload`로 이미지 파일을 보냅니다.
+1. 글쓰기·어드민 화면이 자사 백엔드에 파일을 보내면 백엔드가 로그인 및 해당 작업 권한을 검사한 뒤 내부 `POST /upload`를 호출합니다.
 2. 업로드 서비스가 파일을 임시 파일로 먼저 받습니다.
 3. MIME 타입과 이미지 크기를 검사하고 SHA-256 해시를 계산합니다.
 4. 해시 기반 경로로 원본 파일을 공유폴더에 저장합니다.
@@ -214,6 +214,10 @@ cp .env.example .env
 
 ## 실행 방법
 
+main 병합 후 자동 배포와 로그인 시 최신 버전 복구를 원하면
+[자동 배포 설치/운영 안내](docs/auto-deployment.md)를 참고하세요. 별도 설치형이며 기존
+LaunchAgent 자동 실행과는 구분됩니다. 공개 PR 검사는 GitHub-hosted, 내부 배포는 비공개 runner를 사용합니다.
+
 ### macOS 자동 실행 설정
 
 운영용 Mac에서는 직접 Python 프로세스를 반복 실행하지 않고 LaunchAgent가 SMB 연결과 서비스를 함께 관리하도록 설정하는 것을 권장합니다.
@@ -250,6 +254,9 @@ SMB 주소에는 비밀번호를 포함하지 마세요. `smb://사용자:비밀
 # 자동 실행 제거
 ./scripts/uninstall-launch-agent.sh
 ```
+
+별도 자동 배포까지 설치했다면 제거 전에 [updater와 runner 중지/복구 절차](docs/auto-deployment.md)를
+먼저 따르세요. `uninstall-launch-agent.sh`는 서비스와 네이티브 앱만 제거하며 배포 updater는 제거하지 않습니다.
 
 `restart-service.sh`는 재시작 요청만 보내고 끝나지 않습니다. 최대 30초 동안 `/healthz` 성공을 기다린 뒤 SMB, LaunchAgent, HTTP 상태와 최근 서비스 로그를 출력합니다. 제한시간 안에 복구되지 않으면 최근 오류 로그를 보여주고 종료 코드 `1`을 반환합니다.
 
@@ -323,6 +330,9 @@ curl http://127.0.0.1:8080/healthz
 ```json
 {"status": "ok"}
 ```
+
+응답에는 `X-Image-Release`, `X-Image-Pid`, `Cache-Control: no-store`도 포함됩니다.
+일반 실행의 release 값은 `unmanaged`이며, 이 응답 자체는 DB/SMB readiness 검사가 아닙니다.
 
 ### 2. 업로드
 
@@ -448,6 +458,10 @@ add_header Cache-Control "public, max-age=31536000, immutable";
 
 ## Nginx 연동
 
+업로드는 **우리 서비스의 글쓰기·어드민 기능만 지원**합니다. [업로드 접근 정책](docs/external-upload-security.md)에
+따라 자사 백엔드에서 권한을 검사하고, 공개 Nginx 업로드 경로는 차단합니다. 외부용 API, 브라우저 직접
+업로드, 티켓 발급은 지원하지 않으며 API key를 브라우저/Swift 앱에 배포하지 않습니다.
+
 Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](docs/nginx-integration.md)에 정리되어 있습니다.
 
 핵심만 요약하면:
@@ -482,6 +496,9 @@ Nginx 프로젝트에 전달할 상세 계약은 [docs/nginx-integration.md](doc
 
 - [AGENTS.md](AGENTS.md)
 - [docs/setup.md](docs/setup.md)
+- [docs/auto-deployment.md](docs/auto-deployment.md)
+- [docs/external-upload-security.md](docs/external-upload-security.md)
+- [docs/frontend-image-upload.md](docs/frontend-image-upload.md)
 - [docs/nginx-integration.md](docs/nginx-integration.md)
 - [sql/schema.sql](sql/schema.sql)
 

@@ -1,0 +1,36 @@
+name: Request Private Deployment
+
+on:
+  workflow_run:
+    workflows: [Image Service CI]
+    types: [completed]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  notify:
+    # main push CI가 끝난 다음에만 알린다. PR 코드/아티팩트는 읽거나 실행하지 않는다.
+    if: >-
+      github.repository == 'swift-man/image.gorani.me' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch fixed private workflow
+        env:
+          DISPATCH_TOKEN: ${{ secrets.IMAGE_DEPLOY_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DISPATCH_TOKEN" ]; then
+            echo '::notice::Dispatch token not configured; the local login/interval updater will reconcile main.'
+            exit 0
+          fi
+          curl --fail --silent --show-error --max-time 30 \
+            -X POST \
+            -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/repos/gorani-inc/self-host-runner/actions/workflows/image-upload-deploy.yml/dispatches \
+            -d '{"ref":"main"}'
