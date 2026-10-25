@@ -77,6 +77,12 @@ GitHub App installation token이어야 합니다. 만료/갱신을 관리하세�
 저장소에 접근할 수 없습니다. 토큰 미등록 시 즉시 알림만 건너뛰고 로그인/5분 갱신은 계속됩니다.
 비공개 workflow는 활성화 후 수동 및 15분 간격 복구 실행도 지원합니다.
 
+Actions: write는 이 배포 workflow 하나로 한정된 권한이 아닙니다. 같은 저장소의 다른 수동 workflow
+실행과 Actions 관리에도 영향을 줄 수 있으므로 토큰 유출의 영향 범위를 저장소 전체로 평가하세요.
+공개 저장소 main/workflow 변경 권한자를 신뢰해야 하며, 활성화 전 다른 deploy workflow의 ref 제한도
+점검합니다. main 전용 Environment 사용을 검토하되 workflow의 environment 지정과 보호 규칙을
+함께 구성해야 합니다. 현재 workflow에는 Environment 보호가 적용되어 있지 않습니다.
+
 GitHub 설정/키는 파일이나 PR 본문에 쓰지 않습니다. 이 변경에는 실제 secret 등록이나
 runner 재설정이 포함되지 않습니다.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import http.client
 import io
 import json
 import os
@@ -132,6 +133,37 @@ class DeployTests(unittest.TestCase):
     def test_command_runner_executes_with_private_environment(self):
         result = self.manager.run([sys.executable, "-c", "import os; print(os.getenv('PYTHONNOUSERSITE'))"])
         self.assertEqual(result.strip(), b"1")
+
+    def test_cleanup_timeout_preserves_interruption(self):
+        process = Mock(pid=123)
+        original = deploy.DeploymentInterrupted()
+        process.communicate.side_effect = [original, subprocess.TimeoutExpired("pip", 5)]
+        with patch.object(deploy.subprocess, "Popen", return_value=process), \
+                patch.object(deploy.os, "killpg"), self.assertRaises(deploy.DeploymentInterrupted) as caught:
+            self.manager.run(["pip"])
+        self.assertIs(caught.exception, original)
+
+    def test_health_retries_protocol_errors_until_stable(self):
+        for phase, error in [("open", http.client.BadStatusLine("invalid")),
+                             ("read", http.client.IncompleteRead(b"partial", 10))]:
+            with self.subTest(phase=phase):
+                response = Mock()
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                response.status = 200
+                response.headers = {"X-Image-Release": NEW, "X-Image-Pid": "42"}
+                response.read.return_value = b'{"status":"ok"}'
+                opener = Mock()
+                opener.open.return_value = response
+                if phase == "open":
+                    opener.open.side_effect = [error, response, response]
+                else:
+                    response.read.side_effect = [error, b'{"status":"ok"}', b'{"status":"ok"}']
+                with patch.object(deploy.urllib.request, "build_opener", return_value=opener), \
+                        patch.object(deploy.time, "monotonic", side_effect=[0, 1, 2, 2, 2, 7, 7]), \
+                        patch.object(deploy.time, "sleep"):
+                    self.manager.healthy(NEW)
+                self.assertEqual(opener.open.call_count, 3)
 
     def test_failed_rollback_preserves_journal_for_next_login(self):
         self.manager.restart = Mock()
@@ -391,6 +423,16 @@ class InstallerTests(unittest.TestCase):
         self.root.mkdir()
         with patch.object(deploy.sys, "platform", "darwin"), self.assertRaises(RuntimeError):
             deploy.install(self.root, self.source)
+        self.assertEqual(self.agent.read_bytes(), self.original)
+
+    def test_preparation_failure_does_not_restart_existing_service(self):
+        with patch.object(deploy.Path, "home", return_value=self.home), \
+                patch.object(deploy.sys, "platform", "darwin"), \
+                patch.object(deploy, "write_json", side_effect=OSError("disk full")), \
+                patch.object(deploy.subprocess, "run") as cleanup, \
+                self.assertRaisesRegex(OSError, "disk full"):
+            deploy.install(self.root, self.source)
+        cleanup.assert_not_called()
         self.assertEqual(self.agent.read_bytes(), self.original)
 
     def test_missing_plist_fields_are_rejected_before_modifying_service(self):

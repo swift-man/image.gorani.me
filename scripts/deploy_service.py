@@ -10,6 +10,7 @@ import argparse
 from contextlib import contextmanager
 import fcntl
 import hashlib
+import http.client
 import io
 import ipaddress
 import json
@@ -163,7 +164,11 @@ class Deployer:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            process.communicate(timeout=5)
+            try:
+                process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                # 정리 대기 실패가 최초 종료 신호나 timeout을 덮지 않게 한다.
+                log("프로세스 그룹 종료 후 출력 회수 시간 초과")
             raise
         if process.returncode:
             raise RuntimeError(f"명령 실패: {Path(str(args[0])).name} (exit {process.returncode})")
@@ -259,7 +264,7 @@ if Database(s).run_sql('SELECT 1;').strip() != '1':
                             return
                     else:
                         stable_since = 0
-            except (OSError, ValueError):
+            except (OSError, ValueError, http.client.HTTPException):
                 stable_since = 0
             time.sleep(1)
         raise RuntimeError("서비스 revision/health 확인 시간 초과")
@@ -371,6 +376,8 @@ def install(root, source):
         "guarded": {name: digest(source / name) for name in GUARDED},
     }
     domain = f"gui/{os.getuid()}"
+    service_change_started = False
+    updater_change_started = False
     try:
         write_json(root / "config.json", config)
         atomic_write(root / "original-service.plist", original)
@@ -383,11 +390,14 @@ def install(root, source):
         point_current(root, source)
         service["ProgramArguments"] = [app, str(root / "current/scripts/supervise-service.sh")]
         service["WorkingDirectory"] = str(root / "current")
+        # replace 후 fsync 실패도 복구해야 하므로 쓰기를 시도하기 전에 표시한다.
+        service_change_started = True
         atomic_write(agent, plistlib.dumps(service))
         deployed = Deployer(root)
         deployed.run(["/bin/launchctl", "bootout", f"{domain}/{LABEL}"])
         deployed.run(["/bin/launchctl", "bootstrap", domain, agent])
         deployed.healthy("unmanaged")
+        updater_change_started = True
         atomic_write(updater, plistlib.dumps({
             "Label": f"{LABEL}.deploy", "ProgramArguments": [app, str(root / "auto-deploy.sh")],
             "WorkingDirectory": str(root), "EnvironmentVariables": environment,
@@ -398,11 +408,13 @@ def install(root, source):
         deployed.run(["/bin/launchctl", "bootstrap", domain, updater])
     except BaseException:
         # 설정을 되돌리되 실패 자료는 보존한다. 재설치 전 로그/복구 상태를 확인한다.
-        subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{LABEL}.deploy"], capture_output=True)
-        updater.unlink(missing_ok=True)
-        atomic_write(agent, original)
-        subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
-        subprocess.run(["/bin/launchctl", "bootstrap", domain, agent], capture_output=True)
+        if updater_change_started:
+            subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{LABEL}.deploy"], capture_output=True)
+            updater.unlink(missing_ok=True)
+        if service_change_started:
+            atomic_write(agent, original)
+            subprocess.run(["/bin/launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
+            subprocess.run(["/bin/launchctl", "bootstrap", domain, agent], capture_output=True)
         raise
     log("자동 배포 설치 완료. 로그인 시 및 5분 간격으로 main을 확인합니다.")
 
