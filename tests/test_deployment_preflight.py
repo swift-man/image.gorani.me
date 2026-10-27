@@ -1,5 +1,6 @@
 import contextlib
 import io
+import itertools
 import os
 from pathlib import Path
 import subprocess
@@ -116,16 +117,25 @@ class PreflightTests(unittest.TestCase):
             installed_entry = custom / "ssh-entry.sh"
             installed_entry.write_bytes(entry.read_bytes())
             sync = custom / "sync.sh"
-            # 없는 실행 파일, 실행 권한 누락, 자식의 실패 종료 모두 성공으로 바꾸면 안 된다.
-            for state in ("missing", "not-executable", "failed"):
-                with self.subTest(state=state):
-                    if state != "missing":
-                        sync.write_text("#!/bin/sh\nexit 23\n")
-                        sync.chmod(0o700 if state == "failed" else 0o600)
-                    result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
-                                            cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
-                    if state == "failed":
-                        self.assertEqual(result.returncode, 23)
-                    else:
-                        self.assertNotEqual(result.returncode, 0)
-                    self.assertEqual(result.stdout, "")
+            states = ("missing", "not-executable", "failed")
+            # 모든 순서에서 파일 존재 여부와 권한을 재설정해 앞선 하위 시험과 격리한다.
+            for order in itertools.permutations(states):
+                for state in order:
+                    with self.subTest(order=order, state=state):
+                        sync.unlink(missing_ok=True)
+                        if state != "missing":
+                            sync.write_text("#!/bin/sh\nprintf 'child-started'\nexit 23\n")
+                            mode = 0o700 if state == "failed" else 0o600
+                            sync.chmod(mode)
+                            self.assertEqual(sync.stat().st_mode & 0o777, mode)
+                        else:
+                            self.assertFalse(sync.exists())
+                        result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
+                                                cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
+                        if state == "failed":
+                            self.assertEqual(result.returncode, 23, result.stderr)
+                            self.assertEqual(result.stdout, "child-started")
+                        else:
+                            # exec 실패 코드는 셸마다 다르다. 실패와 자식 미실행을 검증한다.
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertEqual(result.stdout, "")
