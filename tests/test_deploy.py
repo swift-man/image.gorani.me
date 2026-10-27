@@ -188,6 +188,20 @@ class DeployTests(unittest.TestCase):
                 self.assertEqual(clock.now, 106)
                 self.assertGreaterEqual(len(attempts), 2)
 
+    def test_preflight_accepts_successful_subprocess(self):
+        self.manager.run = Mock(return_value=b"")
+        self.assertIsNone(self.manager.preflight(self.new))
+        self.manager.run.assert_called_once_with(
+            [self.new / ".venv/bin/python", "-m", "upload_service.deployment_preflight"],
+            cwd=self.new, timeout=30)
+
+    def test_preflight_does_not_reclassify_interruption(self):
+        interrupted = deploy.DeploymentInterrupted()
+        self.manager.run = Mock(side_effect=interrupted)
+        with self.assertRaises(deploy.DeploymentInterrupted) as caught:
+            self.manager.preflight(self.new)
+        self.assertIs(caught.exception, interrupted)
+
     def test_preflight_reports_only_fixed_codes(self):
         for code, expected in [(41, "CONFIG"), (42, "SMB"), (43, "STORAGE"),
                                (44, "DATABASE"), (1, "PROCESS")]:
