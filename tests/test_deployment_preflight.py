@@ -26,6 +26,7 @@ class PreflightTests(unittest.TestCase):
                         patch.object(preflight, "Database") as database, \
                         contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     self.assertEqual(preflight.main(), 41)
+                # 설정을 먼저 읽는다. .env 가 GORANI_SMB_* 를 채울 수 있다(config._load_dotenv).
                 settings.assert_called_once_with()
                 storage.assert_not_called()
                 roots.assert_not_called()
@@ -92,7 +93,8 @@ class PreflightTests(unittest.TestCase):
             for root, marker in [(default, "wrong-installation"), (custom, "custom-installation")]:
                 root.mkdir(parents=True)
                 sync = root / "sync.sh"
-                sync.write_text("#!/bin/sh\nprintf '" + marker + "'\n")
+                # 출력과 함께 표식 파일도 남긴다. 출력을 버리고 기본 설치를 도는 회귀는 표식으로만 드러난다.
+                sync.write_text("#!/bin/sh\n: >\"$HOME/" + marker + "\"\nprintf '" + marker + "'\n")
                 sync.chmod(0o700)
             installed_entry = custom / "ssh-entry.sh"
             installed_entry.write_bytes(entry.read_bytes())
@@ -101,6 +103,8 @@ class PreflightTests(unittest.TestCase):
                                     cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "custom-installation")
+            self.assertTrue((home / "custom-installation").exists())
+            self.assertFalse((home / "wrong-installation").exists())
 
     def test_ssh_entry_preserves_failure_without_default_fallback(self):
         entry = Path(__file__).resolve().parents[1] / "scripts/deploy-ssh-entry.sh"
@@ -110,7 +114,10 @@ class PreflightTests(unittest.TestCase):
             default = home / "Library/Application Support/gorani-image-upload/deploy"
             default.mkdir(parents=True)
             default_sync = default / "sync.sh"
-            default_sync.write_text("#!/bin/sh\nprintf 'wrong-installation'\n")
+            default_ran, child_ran = home / "default-ran", home / "child-ran"
+            # 출력과 함께 표식 파일도 남긴다. 출력을 버리고 기본 설치를 돌거나 권한 없는 파일을 셸로 돌리는 회귀는
+            # 종료 코드와 출력만으로는 드러나지 않는다.
+            default_sync.write_text("#!/bin/sh\n: >\"$HOME/default-ran\"\nprintf 'wrong-installation'\n")
             default_sync.chmod(0o700)
             custom = home / "custom installation"
             custom.mkdir()
@@ -118,13 +125,15 @@ class PreflightTests(unittest.TestCase):
             installed_entry.write_bytes(entry.read_bytes())
             sync = custom / "sync.sh"
             states = ("missing", "not-executable", "failed")
-            # 모든 순서에서 파일 존재 여부와 권한을 재설정해 앞선 하위 시험과 격리한다.
+            # 매 하위 시험이 파일·권한·표식을 다시 준비하므로 순서와 상관없이 같은 결과여야 한다. 모든 순서를 돌아
+            # 앞선 실행이 남긴 파일이나 표식에 기대는 단언이 없는지도 확인한다.
             for order in itertools.permutations(states):
                 for state in order:
                     with self.subTest(order=order, state=state):
-                        sync.unlink(missing_ok=True)
+                        for path in (sync, default_ran, child_ran):
+                            path.unlink(missing_ok=True)
                         if state != "missing":
-                            sync.write_text("#!/bin/sh\nprintf 'child-started'\nexit 23\n")
+                            sync.write_text("#!/bin/sh\n: >\"$HOME/child-ran\"\nprintf 'child-started'\nexit 23\n")
                             mode = 0o700 if state == "failed" else 0o600
                             sync.chmod(mode)
                             self.assertEqual(sync.stat().st_mode & 0o777, mode)
@@ -132,10 +141,13 @@ class PreflightTests(unittest.TestCase):
                             self.assertFalse(sync.exists())
                         result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
                                                 cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
+                        self.assertFalse(default_ran.exists())
                         if state == "failed":
                             self.assertEqual(result.returncode, 23, result.stderr)
                             self.assertEqual(result.stdout, "child-started")
+                            self.assertTrue(child_ran.exists())
                         else:
                             # exec 실패 코드는 셸마다 다르다. 실패와 자식 미실행을 검증한다.
                             self.assertNotEqual(result.returncode, 0)
                             self.assertEqual(result.stdout, "")
+                            self.assertFalse(child_ran.exists())
