@@ -51,7 +51,10 @@ restrict,command="/bin/sh '/ABSOLUTE/DEPLOY/DIRECTORY/ssh-entry.sh'" ssh-ed25519
 ```
 
 `restrict`는 포워딩/PTY 등의 기능을 제한합니다. 키가 쓰이는 다른 자동화가 있으면 기존 키를
-그대로 제한하지 말고 전용 키로 분리하세요. allowed command도 서버의 현재 설치 경로를 사용합니다.
+그대로 제한하지 말고 전용 키로 분리하세요. 위 원격 명령 문자열은 기존 runner와의 고정 요청
+식별자이므로 `--root`로 설치해도 변경하지 않습니다. 실행 대상은 authorized_keys에 절대 경로로
+등록한 `ssh-entry.sh`와 같은 디렉터리의 `sync.sh`입니다. 기본 경로에 다른 설치가 있어도 호출하지
+않습니다. 진입점은 다른 위치의 심볼릭 링크가 아닌 설치된 파일 자체를 등록하세요.
 키 파일 권한 0600, 신뢰한 known_hosts, 내부망 접근 제한을 유지합니다. 강제 명령만으로
 runner 장비 침해나 동일 운영 사용자 권한을 격리할 수는 없습니다.
 

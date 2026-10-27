@@ -51,10 +51,31 @@ class PreflightTests(unittest.TestCase):
             target.parent.mkdir(parents=True)
             target.write_text("#!/bin/sh\nprintf 'fixture-sync'\n")
             target.chmod(0o700)
+            installed_entry = target.with_name("ssh-entry.sh")
+            installed_entry.write_bytes(entry.read_bytes())
             allowed = 'exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"'
             for command in ("", "id", allowed + "; id", "scp -t /tmp/file", allowed):
                 with self.subTest(command=command):
-                    result = subprocess.run(["/bin/sh", str(entry)], capture_output=True, text=True,
+                    result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
                                             env={"HOME": temp, "SSH_ORIGINAL_COMMAND": command}, timeout=5)
                     self.assertEqual(result.returncode, 0 if command == allowed else 64)
                     self.assertEqual(result.stdout, "fixture-sync" if command == allowed else "")
+
+    def test_custom_root_does_not_execute_default_installation(self):
+        entry = Path(__file__).resolve().parents[1] / "scripts/deploy-ssh-entry.sh"
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            default = home / "Library/Application Support/gorani-image-upload/deploy"
+            custom = home / "custom deployment's directory"
+            for root, marker in [(default, "wrong-installation"), (custom, "custom-installation")]:
+                root.mkdir(parents=True)
+                sync = root / "sync.sh"
+                sync.write_text("#!/bin/sh\nprintf '" + marker + "'\n")
+                sync.chmod(0o700)
+            installed_entry = custom / "ssh-entry.sh"
+            installed_entry.write_bytes(entry.read_bytes())
+            allowed = 'exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"'
+            result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
+                                    cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "custom-installation")

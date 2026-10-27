@@ -186,6 +186,7 @@ class DeployTests(unittest.TestCase):
                         patch.object(deploy.time, "sleep", clock.sleep):
                     self.manager.healthy(NEW)
                 self.assertEqual(clock.now, 106)
+                self.assertGreaterEqual(len(attempts), 2)
 
     def test_preflight_reports_only_fixed_codes(self):
         for code, expected in [(41, "CONFIG"), (42, "SMB"), (43, "STORAGE"),
