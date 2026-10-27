@@ -1,0 +1,5 @@
+# Runtime and build tools share a hash-checked deployment environment.
+Pillow==13.0.0
+python-multipart==0.0.32
+setuptools==84.2.1
+wheel==0.48.0

@@ -33,12 +33,19 @@ API = "https://api.github.com/repos/swift-man/image.gorani.me"
 LABEL = "me.gorani.image-upload"
 DEFAULT_ROOT = Path.home() / "Library/Application Support/gorani-image-upload/deploy"
 # 자동 적용 중에는 DB 마이그레이션과 네이티브 앱 교체를 하지 않는다.
-GUARDED = ("sql/schema.sql", "launchd/GoraniImageUploadLauncher.swift", "scripts/deploy_service.py")
+GUARDED = ("sql/schema.sql", "launchd/GoraniImageUploadLauncher.swift", "scripts/deploy_service.py",
+           "scripts/deploy-ssh-entry.sh")
 SHA = re.compile(r"[0-9a-f]{40}")
 
 
 class DeploymentInterrupted(BaseException):
     """네트워크 오류 처리에 흡수되지 않고 정리 경로까지 전달할 종료 신호."""
+
+
+class CommandFailed(RuntimeError):
+    def __init__(self, command, returncode):
+        self.returncode = returncode
+        super().__init__(f"명령 실패: {Path(str(command)).name} (exit {returncode})")
 
 
 def health_url_for_environment(environment):
@@ -171,7 +178,7 @@ class Deployer:
                 log("프로세스 그룹 종료 후 출력 회수 시간 초과")
             raise
         if process.returncode:
-            raise RuntimeError(f"명령 실패: {Path(str(args[0])).name} (exit {process.returncode})")
+            raise CommandFailed(args[0], process.returncode)
         return output
 
     def latest(self):
@@ -210,7 +217,11 @@ class Deployer:
                     raise RuntimeError(f"수동 업그레이드가 필요한 파일 변경: {name}")
             self.run([self.config["python"], "-m", "venv", release / ".venv"])
             python = release / ".venv/bin/python"
-            self.run([python, "-m", "pip", "install", "--disable-pip-version-check", "."],
+            self.run([python, "-m", "pip", "install", "--disable-pip-version-check",
+                      "--require-hashes", "--only-binary=:all:", "-r", "requirements-deploy.txt"],
+                     cwd=release, timeout=600)
+            self.run([python, "-m", "pip", "install", "--disable-pip-version-check",
+                      "--no-build-isolation", "--no-deps", "."],
                      cwd=release, timeout=600)
             self.run([python, "-m", "pip", "check"], cwd=release)
             # 전체 회귀/DB daemon 시험은 CI에서만 실행한다. 여기서는 .env 연결 전 구문 검증만 한다.
@@ -224,22 +235,15 @@ class Deployer:
 
     def preflight(self, release):
         # 별도 프로세스의 제한시간으로 응답 없는 SMB/psql도 전체 배포를 붙잡지 못한다.
-        self.run([release / ".venv/bin/python", "-c", """
-import os
-from pathlib import Path
-from upload_service.config import load_settings
-from upload_service.db import Database
-from upload_service.macos_runtime import check_storage
-from upload_service.storage import ensure_storage_roots
-s = load_settings()
-ok, message = check_storage(os.environ['GORANI_SMB_URL'],
-    Path(os.environ['GORANI_SMB_MOUNT_POINT']), s.storage_root, 3)
-if not ok:
-    raise RuntimeError(message)
-ensure_storage_roots(s)
-if Database(s).run_sql('SELECT 1;').strip() != '1':
-    raise RuntimeError('Database readiness failed')
-"""], cwd=release, timeout=30)
+        try:
+            self.run([release / ".venv/bin/python", "-m", "upload_service.deployment_preflight"],
+                     cwd=release, timeout=30)
+        except CommandFailed as exc:
+            reason = {41: "CONFIG", 42: "SMB", 43: "STORAGE", 44: "DATABASE"}.get(
+                exc.returncode, "PROCESS")
+            raise RuntimeError(f"사전 검사 실패: {reason}") from None
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("사전 검사 실패: TIMEOUT") from None
 
     def restart(self):
         self.run(["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{LABEL}"], timeout=30)
@@ -333,6 +337,8 @@ def install(root, source):
     """기존 서비스 설정/키체인 주체를 보존하고 별도 updater LaunchAgent만 추가한다."""
     if sys.platform != "darwin":
         raise RuntimeError("macOS에서만 설치할 수 있습니다.")
+    if sys.version_info < (3, 11):
+        raise RuntimeError("Python 3.11 이상으로 운영 가상환경을 먼저 준비하세요.")
     if root.exists():
         raise RuntimeError("배포 디렉터리가 이미 있습니다. 기존 설정을 덮어쓰지 않습니다.")
     source = source.resolve(strict=True)
@@ -382,6 +388,7 @@ def install(root, source):
         write_json(root / "config.json", config)
         atomic_write(root / "original-service.plist", original)
         atomic_write(root / "manager.py", Path(__file__).read_bytes())
+        atomic_write(root / "ssh-entry.sh", (source / "scripts/deploy-ssh-entry.sh").read_bytes(), 0o700)
         script = "#!/bin/zsh\nset -eu\nexec " + " ".join(shlex.quote(s) for s in [
             config["python"], str(root / "manager.py"), "--root", str(root), "sync"]) + "\n"
         atomic_write(root / "auto-deploy.sh", script.encode(), 0o700)

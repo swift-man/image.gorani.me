@@ -32,7 +32,8 @@ CI가 단순히 아직 성공하지 않은 경우의 `적용 보류`(종료 코�
 
 먼저 이 PR을 main에 병합하고, 기존 운영 checkout에서 아래를 실행합니다. 개발 worktree에서
 설치하지 마세요. 기존 `.env`, 공유폴더와 PostgreSQL, 네이티브 LaunchAgent가 정상이어야 합니다.
-Python 3.9 이상, git, psql, file, sips, zsh가 필요하며 Python 기본 설치 경로를 계속 유지해야 합니다.
+Python 3.11 이상, git, psql, file, sips, zsh가 필요하며 Python 기본 설치 경로를 계속 유지해야 합니다.
+기존 3.9/3.10 환경은 [0.4.0 전환 절차](deployment-hardening.md)를 먼저 확인하세요.
 
 ```sh
 git switch main
@@ -46,11 +47,12 @@ chmod 600 .env
 설치는 서비스 plist를 백업하고 작업 디렉터리를 `current` 링크로 바꿉니다. 이 과정에 짧은
 재시작이 있습니다. `.env`는 기존 checkout에 그대로 두고 release에서 링크하므로 그 파일과
 checkout을 삭제하지 마세요. 기존 `.venv`도 건드리지 않습니다. Git에 추적되어 있는 `.venv`는
-배포 archive에서 제외하고 커밋마다 새로 만듭니다. 의존성은 `pyproject.toml` 범위에 따라 설치하며
-lockfile 기반 재현 빌드는 아직 아닙니다.
+배포 archive에서 제외하고 커밋마다 새로 만듭니다. 런타임과 빌드 의존성은
+`requirements-deploy.txt`의 버전/SHA-256으로 검증하며 wheel이 없는 플랫폼에서는 실패합니다.
+프로젝트 빌드는 `--no-build-isolation --no-deps`로 추가 의존성 다운로드를 막습니다.
 
 설치된 안정 버전 배포기(`manager.py`)는 main으로 자동 덮어쓰지 않습니다. 배포기 자체 또는
-`sql/schema.sql`, 네이티브 Swift 런처를 변경할 때는 아래의 수동 업그레이드 절차를 사용합니다.
+`sql/schema.sql`, 네이티브 Swift 런처, SSH 강제 명령 진입점을 변경할 때는 아래의 수동 업그레이드 절차를 사용합니다.
 스키마/런처/배포기 변경은 자동 배포가 거부합니다. 일반 Python 코드에 숨겨진 DB 마이그레이션까지
 감지하는 장치는 아니므로 리뷰에서 데이터 호환성을 별도로 확인해야 합니다.
 
@@ -86,6 +88,9 @@ Actions: write는 이 배포 workflow 하나로 한정된 권한이 아닙니다
 GitHub 설정/키는 파일이나 PR 본문에 쓰지 않습니다. 이 변경에는 실제 secret 등록이나
 runner 재설정이 포함되지 않습니다.
 
+전용 배포 키에는 [SSH 강제 명령 설정](deployment-hardening.md)을 적용할 수 있습니다.
+설치기는 `ssh-entry.sh`만 준비하며 authorized_keys를 자동 수정하지 않습니다.
+
 ## 성공 확인과 로그
 
 ```sh
@@ -100,6 +105,10 @@ curl -i http://127.0.0.1:8080/healthz
 `IMAGE_UPLOAD_HOST`와 포트를 사용하며 wildcard 주소만 로컬 검사 주소로 바꿉니다.
 필수 plist 키나 PATH가 빠지면 서비스를 변경하기 전에 누락된 키를 안내하고 설치를 거부합니다.
 수동/runner 실행 로그는 해당 터미널/Actions에 출력되고 주기 실행 로그는 위 파일에 기록됩니다.
+
+사전 검사 실패는 CONFIG, SMB, STORAGE, DATABASE, PROCESS, TIMEOUT 코드로 구분합니다.
+자식 프로세스 출력과 예외 원문은 비밀값 보호를 위해 출력하지 않습니다. 코드는 원인 영역이며
+권한/경로/네트워크의 세부 원인을 확정하는 진단은 아닙니다.
 
 - `배포 완료: <sha>`: 새 release의 SHA와 같은 PID가 5초 이상 정상 응답하고 SMB/DB 재검사도 성공.
 - `최신 release 정상: <sha>`: 이미 최신이고 추가 재시작은 하지 않음.
