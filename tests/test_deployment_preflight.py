@@ -3,12 +3,18 @@ import io
 import itertools
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
 from upload_service import deployment_preflight as preflight
+
+
+def marker_script(marker, *commands):
+    """`marker` 에 표식 파일을 남긴 뒤 commands 를 도는 sh 스크립트. 단언과 같은 Path 에서 경로를 만든다."""
+    return "\n".join(["#!/bin/sh", ": >" + shlex.quote(str(marker)), *commands, ""])
 
 
 class PreflightTests(unittest.TestCase):
@@ -90,11 +96,12 @@ class PreflightTests(unittest.TestCase):
             home = Path(temp)
             default = home / "Library/Application Support/gorani-image-upload/deploy"
             custom = home / "custom deployment's directory"
-            for root, marker in [(default, "wrong-installation"), (custom, "custom-installation")]:
+            default_marker, custom_marker = home / "wrong-installation", home / "custom-installation"
+            for root, marker in [(default, default_marker), (custom, custom_marker)]:
                 root.mkdir(parents=True)
                 sync = root / "sync.sh"
                 # 출력과 함께 표식 파일도 남긴다. 출력을 버리고 기본 설치를 도는 회귀는 표식으로만 드러난다.
-                sync.write_text("#!/bin/sh\n: >\"$HOME/" + marker + "\"\nprintf '" + marker + "'\n")
+                sync.write_text(marker_script(marker, f"printf '{marker.name}'"))
                 sync.chmod(0o700)
             installed_entry = custom / "ssh-entry.sh"
             installed_entry.write_bytes(entry.read_bytes())
@@ -102,9 +109,9 @@ class PreflightTests(unittest.TestCase):
             result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
                                     cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, "custom-installation")
-            self.assertTrue((home / "custom-installation").exists())
-            self.assertFalse((home / "wrong-installation").exists())
+            self.assertEqual(result.stdout, custom_marker.name)
+            self.assertTrue(custom_marker.exists())
+            self.assertFalse(default_marker.exists())
 
     def test_ssh_entry_preserves_failure_without_default_fallback(self):
         entry = Path(__file__).resolve().parents[1] / "scripts/deploy-ssh-entry.sh"
@@ -117,7 +124,7 @@ class PreflightTests(unittest.TestCase):
             default_ran, child_ran = home / "default-ran", home / "child-ran"
             # 출력과 함께 표식 파일도 남긴다. 출력을 버리고 기본 설치를 돌거나 권한 없는 파일을 셸로 돌리는 회귀는
             # 종료 코드와 출력만으로는 드러나지 않는다.
-            default_sync.write_text("#!/bin/sh\n: >\"$HOME/default-ran\"\nprintf 'wrong-installation'\n")
+            default_sync.write_text(marker_script(default_ran, "printf 'wrong-installation'"))
             default_sync.chmod(0o700)
             custom = home / "custom installation"
             custom.mkdir()
@@ -133,7 +140,7 @@ class PreflightTests(unittest.TestCase):
                         for path in (sync, default_ran, child_ran):
                             path.unlink(missing_ok=True)
                         if state != "missing":
-                            sync.write_text("#!/bin/sh\n: >\"$HOME/child-ran\"\nprintf 'child-started'\nexit 23\n")
+                            sync.write_text(marker_script(child_ran, "printf 'child-started'", "exit 23"))
                             mode = 0o700 if state == "failed" else 0o600
                             sync.chmod(mode)
                             self.assertEqual(sync.stat().st_mode & 0o777, mode)
