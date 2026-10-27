@@ -1,0 +1,77 @@
+# 배포 후속 개선과 0.4.0 전환
+
+## 적용 범위와 Python 전환
+
+Python 3.11 이상이 필요합니다. Python 3.9에서 설치되는 Pillow 11.3 계열을 계속 고정하는 대신
+Pillow 13.0.0과 python-multipart 0.0.32로 전환합니다. 기존 사용자 환경의 Python과 `.venv`를
+이 PR이나 배포기가 자동 교체하지 않습니다. 운영 적용 전에 아래 순서를 따릅니다.
+
+1. 기존 main, `.env`, 서비스 plist, 배포 설정을 비공개 위치에 백업합니다.
+2. Python 3.11 또는 3.12의 별도 가상환경에서 lock 설치, 프로젝트 빌드, `pip check`, 전체 시험을 실행합니다.
+3. 유지보수 시간에 runner 배포를 비활성화하고 원격 배포가 끝난 것을 확인한 뒤 updater/서비스를 중지합니다.
+4. `auto-deployment.md`의 수동 업그레이드 절차에 따라 기존 배포 설정을 복원하고 운영 checkout/가상환경을 전환합니다.
+5. 새 Python으로 서비스와 배포기를 설치하고 SMB/DB/health, 글쓰기·어드민 업로드를 확인한 뒤 자동 배포를 켭니다.
+
+기존 배포기는 자기 코드 변경을 거부하므로 이번 릴리스는 자동 갱신 대상이 아닙니다.
+실패하면 백업한 checkout/가상환경/plist로 복원합니다. 운영 `.env`, 이미지 파일, DB는 교체 대상이 아닙니다.
+
+## 의존성 lock
+
+CI와 배포는 동일한 `requirements-deploy.txt`를 사용합니다. 런타임뿐 아니라 setuptools/wheel 및
+전이 의존성을 고정합니다. 해시 불일치와 지원 wheel 부재는 설치 실패로 처리하고 기존 release를 유지합니다.
+Python/OS/pip 자체와 외부 `sips`, `file`, PostgreSQL은 lock 범위 밖입니다. 바이트 단위로 동일한
+애플리케이션 wheel 재생성을 보장한다는 의미는 아닙니다.
+
+버전 갱신 시 `pyproject.toml`과 `requirements-deploy.in`을 함께 수정하고 별도 도구 환경에서:
+
+```sh
+python3.11 -m venv /tmp/image-lock-tools
+/tmp/image-lock-tools/bin/python -m pip install pip-tools==7.6.2
+/tmp/image-lock-tools/bin/pip-compile --generate-hashes --allow-unsafe --strip-extras \
+  --no-emit-index-url --no-emit-trusted-host --output-file requirements-deploy.txt requirements-deploy.in
+```
+
+생성된 diff의 버전/해시를 검토하고 3.11/3.12에서 새 가상환경 설치 및 전체 시험을 통과시킵니다.
+해시는 다운로드 무결성 검증이지 취약점 부재의 보장이 아닙니다. 보안 공지는 주기적으로 확인해야 합니다.
+
+## SSH 키 최소 권한
+
+배포 설치 시 안정 디렉터리에 `ssh-entry.sh`를 복사합니다. 기존 runner의 아래 명령만 허용하고
+셸, SCP/SFTP, 추가 인자/명령은 거부합니다. 입력을 `eval`하지 않습니다.
+
+```sh
+exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"
+```
+
+운영자가 별도 전용 키를 준비하고 authorized_keys에 다음 형식으로 직접 등록합니다.
+경로와 공개키는 예시를 실제 값으로 바꾸되 저장소에 커밋하지 않습니다.
+
+```text
+restrict,command="/bin/sh '/ABSOLUTE/DEPLOY/DIRECTORY/ssh-entry.sh'" ssh-ed25519 PUBLIC_KEY
+```
+
+`restrict`는 포워딩/PTY 등의 기능을 제한합니다. 키가 쓰이는 다른 자동화가 있으면 기존 키를
+그대로 제한하지 말고 전용 키로 분리하세요. 위 원격 명령 문자열은 기존 runner와의 고정 요청
+식별자이므로 `--root`로 설치해도 변경하지 않습니다. 실행 대상은 authorized_keys에 절대 경로로
+등록한 `ssh-entry.sh`와 같은 디렉터리의 `sync.sh`입니다. 기본 경로에 다른 설치가 있어도 호출하지
+않습니다. 진입점은 다른 위치의 심볼릭 링크가 아닌 설치된 파일 자체를 등록하세요.
+키 파일 권한 0600, 신뢰한 known_hosts, 내부망 접근 제한을 유지합니다. 강제 명령만으로
+runner 장비 침해나 동일 운영 사용자 권한을 격리할 수는 없습니다.
+
+## 중단 검증: 완료된 것과 남은 것
+
+자동 시험은 임시 디렉터리와 실제 자식 프로세스를 사용하여 전환 후 SIGKILL로 끊고, 다음
+recover가 이전 포인터로 복원하며 실패 SHA를 차단하는지 검증합니다. 네이티브 launchd/SSH/SMB를
+이 시험에서 호출하지 않습니다. 가짜 시계는 sleep에 의해서만 전진하므로 시간 조회 횟수 변경에 안전합니다.
+
+실제 SSH 취소 E2E는 아직 미실행입니다. 활성화 전에 운영과 분리된 시험 계정/서비스에서 두 runner 각각:
+
+1. 올바른 고정 명령은 실행되고 `id`, 빈 명령, 추가 셸 명령, SFTP와 포워딩은 거부되는지 확인합니다.
+2. 준비/전환/health 확인 단계 각각에서 SSH 단절 또는 job 취소를 발생시킵니다.
+3. Actions 종료 상태만 믿지 말고 원격 프로세스와 잠금, `pending.json`, current SHA 및 health를 확인합니다.
+4. 원격 작업이 계속되면 끝날 때까지 기다립니다. 종료되고 journal이 남으면 다음 sync의 복구를 확인합니다.
+5. 복구 실패 시 journal을 삭제하거나 retry로 우회하지 않습니다. 원인 해결 후 정상 복구를 먼저 확인합니다.
+
+SIGTERM은 예외 기반 정리 경로를 거치지만 SIGKILL/SIGHUP 등 즉시 종료는 다음 sync의 journal 복구에
+의존합니다. SSH가 끊겨도 원격 작업이 계속될 수 있습니다. job 취소를 안전한 원격 종료의 대체로 쓰지 마세요.
+운영 SSH 키/서비스 변경 및 해당 E2E는 별도 승인된 유지보수 작업입니다.

@@ -13,6 +13,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 import urllib.request
@@ -27,6 +28,18 @@ deploy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(deploy)
 OLD = "a" * 40
 NEW = "b" * 40
+
+
+class FakeClock:
+    """조회 횟수와 무관하게 sleep으로만 전진하는 테스트 시계."""
+    def __init__(self):
+        self.now = 100.0
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
 
 
 def archive(*members):
@@ -155,15 +168,88 @@ class DeployTests(unittest.TestCase):
                 response.read.return_value = b'{"status":"ok"}'
                 opener = Mock()
                 opener.open.return_value = response
+                attempts = []
+
+                def transient_error(*_args, **_kwargs):
+                    attempts.append(True)
+                    if len(attempts) == 1:
+                        raise error
+                    return response if phase == "open" else b'{"status":"ok"}'
+
                 if phase == "open":
-                    opener.open.side_effect = [error, response, response]
+                    opener.open.side_effect = transient_error
                 else:
-                    response.read.side_effect = [error, b'{"status":"ok"}', b'{"status":"ok"}']
+                    response.read.side_effect = transient_error
+                clock = FakeClock()
                 with patch.object(deploy.urllib.request, "build_opener", return_value=opener), \
-                        patch.object(deploy.time, "monotonic", side_effect=[0, 1, 2, 2, 2, 7, 7]), \
-                        patch.object(deploy.time, "sleep"):
+                        patch.object(deploy.time, "monotonic", clock.monotonic), \
+                        patch.object(deploy.time, "sleep", clock.sleep):
                     self.manager.healthy(NEW)
-                self.assertEqual(opener.open.call_count, 3)
+                self.assertEqual(clock.now, 106)
+                self.assertGreaterEqual(len(attempts), 2)
+
+    def test_preflight_reports_only_fixed_codes(self):
+        for code, expected in [(41, "CONFIG"), (42, "SMB"), (43, "STORAGE"),
+                               (44, "DATABASE"), (1, "PROCESS")]:
+            with self.subTest(code=code):
+                self.manager.run = Mock(side_effect=deploy.CommandFailed("secret-command", code))
+                with self.assertRaisesRegex(RuntimeError, "^사전 검사 실패: " + expected + "$"):
+                    self.manager.preflight(self.new)
+        self.manager.run = Mock(side_effect=subprocess.TimeoutExpired("secret-command", 30))
+        with self.assertRaisesRegex(RuntimeError, "^사전 검사 실패: TIMEOUT$"):
+            self.manager.preflight(self.new)
+
+    def test_real_process_kill_leaves_recoverable_journal(self):
+        # 임시 디렉터리만 사용한다. launchd/SMB/운영 DB에는 접근하지 않는다.
+        script = '''
+import importlib.util, pathlib, signal, sys
+spec = importlib.util.spec_from_file_location("deploy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+manager = module.Deployer(pathlib.Path(sys.argv[2]))
+manager.restart = lambda: None
+def wait(_sha):
+    (manager.root / "ready").touch()
+    signal.pause()
+manager.healthy = wait
+manager.activate(manager.root / "new", sys.argv[3])
+'''
+        process = subprocess.Popen([sys.executable, "-c", script,
+                                    str(ROOT / "scripts/deploy_service.py"), str(self.root), NEW])
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.root / "ready").exists():
+                if process.poll() is not None or time.monotonic() > deadline:
+                    self.fail("격리 배포 프로세스 준비 실패")
+                time.sleep(0.01)
+            process.kill()
+            process.wait(timeout=5)
+            self.assertTrue((self.root / "pending.json").exists())
+            self.assertEqual((self.root / "current").resolve(), self.new)
+            self.manager.restart = Mock()
+            self.manager.healthy = Mock()
+            self.manager.recover()
+            self.assertEqual((self.root / "current").resolve(), self.old)
+            self.assertFalse((self.root / "pending.json").exists())
+            self.assertEqual(json.loads((self.root / "failed.json").read_text())["sha"], NEW)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+
+    def test_prepare_uses_hash_lock_and_offline_project_build(self):
+        def run(args, **_kwargs):
+            if "archive" in args:
+                return archive(("requirements-deploy.txt", b"fixture", tarfile.REGTYPE))
+            return b""
+        self.manager.run = Mock(side_effect=run)
+        self.manager.prepare(NEW)
+        commands = [call.args[0] for call in self.manager.run.call_args_list]
+        installs = [args for args in commands if "install" in args]
+        self.assertIn("--require-hashes", installs[0])
+        self.assertIn("--only-binary=:all:", installs[0])
+        self.assertIn("--no-build-isolation", installs[1])
+        self.assertIn("--no-deps", installs[1])
 
     def test_failed_rollback_preserves_journal_for_next_login(self):
         self.manager.restart = Mock()
@@ -390,6 +476,17 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("KeepAlive", updater)
         self.assertEqual((self.root / "config.json").stat().st_mode & 0o777, 0o600)
         self.assertNotIn("test-fixture", (self.root / "config.json").read_text())
+        self.assertEqual((self.root / "ssh-entry.sh").read_bytes(),
+                         (self.source / "scripts/deploy-ssh-entry.sh").read_bytes())
+        self.assertEqual((self.root / "ssh-entry.sh").stat().st_mode & 0o777, 0o700)
+
+    def test_old_python_is_rejected_before_installation(self):
+        with patch.object(deploy.sys, "platform", "darwin"), \
+                patch.object(deploy.sys, "version_info", (3, 9)), \
+                self.assertRaisesRegex(RuntimeError, "3.11"):
+            deploy.install(self.root, self.source)
+        self.assertFalse(self.root.exists())
+        self.assertEqual(self.agent.read_bytes(), self.original)
 
     def test_installer_health_uses_existing_specific_listener_address(self):
         service = plistlib.loads(self.original)

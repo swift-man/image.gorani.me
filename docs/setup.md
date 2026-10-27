@@ -12,6 +12,10 @@ This repository now contains a minimal upload-side service that:
 
 ## Endpoints
 
+Runtime requirement: Python 3.11 or newer. Install the hash-locked runtime/build dependencies from
+`requirements-deploy.txt`, then install this project with `--no-build-isolation --no-deps`.
+See [deployment hardening and migration](deployment-hardening.md) before upgrading an existing service.
+
 These are internal backend/management endpoints, not a public upload API. Only the site's authenticated
 writing/editor and admin backend may upload; it must check each user's permissions. Do not expose API keys
 to browsers or shipped apps. Public Nginx/firewall access must follow [the upload policy](external-upload-security.md).

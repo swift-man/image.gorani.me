@@ -87,7 +87,7 @@
 
 실행 전에 아래 항목이 준비되어 있어야 합니다.
 
-- `python3`
+- Python 3.11 이상 (CI 검증: 3.11 / 3.12)
 - `Pillow`
 - `python-multipart`
 - `psql`
@@ -105,9 +105,14 @@
 ```bash
 git clone https://github.com/swift-man/image.gorani.me.git
 cd image.gorani.me
-python3 -m venv .venv
-.venv/bin/pip install .
+python3.11 -m venv .venv
+.venv/bin/python -m pip install --require-hashes --only-binary=:all: -r requirements-deploy.txt
+.venv/bin/python -m pip install --no-build-isolation --no-deps .
+.venv/bin/python -m pip check
 ```
+
+0.4.0부터 Python 3.9/3.10을 지원하지 않습니다. 기존 운영 가상환경을 실행 중에 덮어쓰지 말고
+[배포 보완 및 전환 절차](docs/deployment-hardening.md)에 따라 별도 환경에서 먼저 검증하세요.
 
 ### 2. 공유폴더 마운트
 
