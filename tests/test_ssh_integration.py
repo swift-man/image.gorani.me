@@ -44,7 +44,10 @@ class SSHIntegrationTests(unittest.TestCase):
         # 이 파일만 실행한다. 실제 배포기나 운영 서비스에는 접근하지 않는다.
         sync.write_text("#!/bin/sh\nprintf 'isolated-sync'\nexit 23\n")
         sync.chmod(0o700)
-        forced = "/bin/sh " + shlex.quote(str(entry))
+        # 경로 처리 회귀가 있어도 실제 운영 홈의 배포기를 실행하지 않도록 한정한다.
+        home = cls.directory / "home"
+        home.mkdir()
+        forced = "/usr/bin/env HOME=" + shlex.quote(str(home)) + " /bin/sh " + shlex.quote(str(entry))
         forced = forced.replace("\\", "\\\\").replace('"', '\\"')
         public_key = (cls.directory / "client.pub").read_text().strip()
         authorized = cls.directory / "authorized_keys"
@@ -106,15 +109,15 @@ LogLevel VERBOSE
                 cls.server.kill()
                 cls.server.wait(timeout=5)
 
-    def request(self, command, *, key="client", options=()):
+    def request(self, command=None, *, key="client", options=()):
         return subprocess.run([
             self.ssh, "-F", "/dev/null", "-T", "-p", str(self.port),
             "-i", str(self.directory / key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
             "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=yes",
             "-o", f"UserKnownHostsFile={self.directory / 'known_hosts'}",
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=3",
-            *options, f"{self.username}@127.0.0.1", command,
-        ], env=self.environment, capture_output=True, text=True, timeout=10)
+            *options, f"{self.username}@127.0.0.1", *([] if command is None else [command]),
+        ], env=self.environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
 
     def test_allowed_command_preserves_remote_exit(self):
         result = self.request(ALLOWED)
@@ -127,6 +130,11 @@ LogLevel VERBOSE
                 result = self.request(command)
                 self.assertEqual(result.returncode, 64, result.stderr)
                 self.assertEqual(result.stdout, "")
+
+    def test_shell_request_without_command_is_denied(self):
+        result = self.request()
+        self.assertEqual(result.returncode, 64, result.stderr)
+        self.assertEqual(result.stdout, "")
 
     def test_unregistered_key_cannot_authenticate(self):
         result = self.request(ALLOWED, key="untrusted")
@@ -149,7 +157,12 @@ LogLevel VERBOSE
     def test_restricted_key_cannot_allocate_pty(self):
         result = self.request(ALLOWED, options=("-tt",))
         self.assertIn("PTY allocation request failed", result.stderr)
-        self.assertIn(result.returncode, (23, 255), result.stderr)
+        # OpenSSH는 PTY 거절 시 즉시 끝나거나 PTY 없이 강제 명령을 계속할 수 있다.
+        if result.returncode == 255:
+            self.assertEqual(result.stdout, "")
+        else:
+            self.assertEqual(result.returncode, 23, result.stderr)
+            self.assertEqual(result.stdout, "isolated-sync")
 
     def test_subsystem_request_is_denied(self):
         result = self.request("sftp", options=("-s",))

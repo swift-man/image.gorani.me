@@ -75,6 +75,9 @@ recover가 이전 포인터로 복원하며 실패 SHA를 차단하는지 검증
 `restrict,command=`를 검사합니다. 임시 호스트 키와 접속 키만 사용하고 사용자/시스템 SSH 설정,
 authorized_keys, known_hosts는 사용하거나 변경하지 않습니다. 호스트키는 생성한 공개키로 고정하며
 비밀번호 인증과 에이전트를 사용하지 않습니다. 실행되는 sync.sh도 종료 코드 23을 반환하는 임시 파일입니다.
+클라이언트 표준 입력은 DEVNULL로 닫고 원격 강제 명령의 HOME도 임시 디렉터리로 한정합니다.
+명령 인자가 없는 셸 요청도 별도로 거부를 검증합니다. PTY 거부 후 즉시 종료하는 경우에는 빈 출력,
+PTY 없이 명령을 계속하는 경우에는 fixture의 출력과 종료 코드 23을 함께 확인합니다.
 
 ```sh
 IMAGE_TEST_SSH=1 .venv/bin/python -m unittest discover -s tests -p test_ssh_integration.py -v
