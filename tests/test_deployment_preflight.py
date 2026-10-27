@@ -11,6 +11,27 @@ from upload_service import deployment_preflight as preflight
 
 
 class PreflightTests(unittest.TestCase):
+    def test_missing_smb_environment_is_silent_config_failure(self):
+        # 실제 셸의 환경변수로 누락 경로가 가려지지 않도록 전부 비운다.
+        environments = ({}, {"GORANI_SMB_URL": "fixture"},
+                        {"GORANI_SMB_MOUNT_POINT": "/fixture"})
+        for environment in environments:
+            with self.subTest(present=sorted(environment)):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with patch.dict(os.environ, environment, clear=True), \
+                        patch.object(preflight, "load_settings", return_value=Mock()) as settings, \
+                        patch.object(preflight, "check_storage") as storage, \
+                        patch.object(preflight, "ensure_storage_roots") as roots, \
+                        patch.object(preflight, "Database") as database, \
+                        contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    self.assertEqual(preflight.main(), 41)
+                settings.assert_called_once_with()
+                storage.assert_not_called()
+                roots.assert_not_called()
+                database.assert_not_called()
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(stderr.getvalue(), "")
+
     def test_negative_readiness_results(self):
         with patch.dict(os.environ, {"GORANI_SMB_URL": "fixture", "GORANI_SMB_MOUNT_POINT": "/fixture"}), \
                 patch.object(preflight, "load_settings", return_value=Mock()), \
@@ -79,3 +100,32 @@ class PreflightTests(unittest.TestCase):
                                     cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, "custom-installation")
+
+    def test_ssh_entry_preserves_failure_without_default_fallback(self):
+        entry = Path(__file__).resolve().parents[1] / "scripts/deploy-ssh-entry.sh"
+        allowed = 'exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"'
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            default = home / "Library/Application Support/gorani-image-upload/deploy"
+            default.mkdir(parents=True)
+            default_sync = default / "sync.sh"
+            default_sync.write_text("#!/bin/sh\nprintf 'wrong-installation'\n")
+            default_sync.chmod(0o700)
+            custom = home / "custom installation"
+            custom.mkdir()
+            installed_entry = custom / "ssh-entry.sh"
+            installed_entry.write_bytes(entry.read_bytes())
+            sync = custom / "sync.sh"
+            # 없는 실행 파일, 실행 권한 누락, 자식의 실패 종료 모두 성공으로 바꾸면 안 된다.
+            for state in ("missing", "not-executable", "failed"):
+                with self.subTest(state=state):
+                    if state != "missing":
+                        sync.write_text("#!/bin/sh\nexit 23\n")
+                        sync.chmod(0o700 if state == "failed" else 0o600)
+                    result = subprocess.run(["/bin/sh", str(installed_entry)], capture_output=True, text=True,
+                                            cwd="/", env={"HOME": temp, "SSH_ORIGINAL_COMMAND": allowed}, timeout=5)
+                    if state == "failed":
+                        self.assertEqual(result.returncode, 23)
+                    else:
+                        self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
