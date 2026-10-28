@@ -25,6 +25,8 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Install and test
+        env:
+          IMAGE_TEST_SSH: '1'
         run: |
           python -m pip install --require-hashes --only-binary=:all: -r requirements-deploy.txt
           python -m pip install --no-build-isolation --no-deps .
