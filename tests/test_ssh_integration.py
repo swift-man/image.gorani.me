@@ -13,10 +13,24 @@ import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = 'exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"'
+
+
+def ssh_log_tail(directory):
+    """임시 서버 로그만 제한된 크기로 읽어 최초 실패의 진단을 보조한다."""
+    try:
+        with (directory / "sshd.log").open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            stream.seek(max(0, stream.tell() - 4096))
+            content = stream.read(4096).decode("utf-8", errors="replace")
+    except OSError:
+        # 파일 경로/예외 내용을 추가로 노출하거나 원래 실패를 덮지 않는다.
+        content = "[log unavailable]"
+    return "\nIsolated sshd log (last 4096 bytes):\n" + (content or "[empty log]")
 
 
 @unittest.skipUnless(os.environ.get("IMAGE_TEST_SSH") == "1", "isolated SSH integration is opt-in")
@@ -88,7 +102,7 @@ LogLevel VERBOSE
         deadline = time.monotonic() + 10
         while True:
             if cls.server.poll() is not None:
-                raise RuntimeError("isolated sshd exited: " + (cls.directory / "sshd.log").read_text())
+                raise RuntimeError("isolated sshd exited" + ssh_log_tail(cls.directory))
             try:
                 with socket.create_connection(("127.0.0.1", cls.port), timeout=0.2) as connection:
                     if connection.recv(256).startswith(b"SSH-"):
@@ -96,7 +110,7 @@ LogLevel VERBOSE
             except OSError:
                 pass
             if time.monotonic() >= deadline:
-                raise RuntimeError("isolated sshd startup timed out")
+                raise RuntimeError("isolated sshd startup timed out" + ssh_log_tail(cls.directory))
             time.sleep(0.05)
 
     @classmethod
@@ -109,15 +123,26 @@ LogLevel VERBOSE
                 cls.server.kill()
                 cls.server.wait(timeout=5)
 
+    def _formatMessage(self, msg, standardMsg):
+        # unittest의 단언 실패 경로에서만 읽는다. 성공/예상된 SSH 거부는 출력하지 않는다.
+        return super()._formatMessage(msg, standardMsg) + ssh_log_tail(self.directory)
+
     def request(self, command=None, *, key="client", options=()):
-        return subprocess.run([
+        args = [
             self.ssh, "-F", "/dev/null", "-T", "-p", str(self.port),
             "-i", str(self.directory / key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
             "-o", "IdentityAgent=none", "-o", "StrictHostKeyChecking=yes",
             "-o", f"UserKnownHostsFile={self.directory / 'known_hosts'}",
             "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=3",
             *options, f"{self.username}@127.0.0.1", *([] if command is None else [command]),
-        ], env=self.environment, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        ]
+        try:
+            return subprocess.run(args, env=self.environment, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=10)
+        except (subprocess.TimeoutExpired, OSError) as error:
+            # 타입/종료 원인은 보존하고 Python 3.11 traceback의 부가 설명만 붙인다.
+            error.add_note(ssh_log_tail(self.directory))
+            raise
 
     def test_allowed_command_preserves_remote_exit(self):
         result = self.request(ALLOWED)
@@ -168,3 +193,51 @@ LogLevel VERBOSE
         result = self.request("sftp", options=("-s",))
         self.assertEqual(result.returncode, 64, result.stderr)
         self.assertEqual(result.stdout, "")
+
+
+class SSHDiagnosticsTests(unittest.TestCase):
+    """sshd 없이도 실패 진단 자체의 크기 제한과 원인 보존을 검사한다."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="image-ssh-diagnostics-")
+        self.addCleanup(temporary.cleanup)
+        self.directory = Path(temporary.name)
+        self.log = self.directory / "sshd.log"
+
+    def test_tail_is_bounded_and_keeps_latest_bytes(self):
+        self.log.write_bytes(b"discarded-prefix" + b"x" * 4096 + b"latest")
+        result = ssh_log_tail(self.directory)
+        self.assertNotIn("discarded-prefix", result)
+        self.assertTrue(result.endswith("x" * 4090 + "latest"))
+        self.assertEqual(len(result.split("\n", 2)[2]), 4096)
+
+    def test_missing_empty_and_invalid_utf8_logs(self):
+        self.assertIn("[log unavailable]", ssh_log_tail(self.directory))
+        self.log.write_bytes(b"")
+        self.assertIn("[empty log]", ssh_log_tail(self.directory))
+        self.log.write_bytes(b"\xfflatest")
+        self.assertTrue(ssh_log_tail(self.directory).endswith("\ufffdlatest"))
+
+    def test_assertion_failure_preserves_message_and_adds_log(self):
+        self.log.write_text("diagnostic-marker")
+        case = SSHIntegrationTests("test_allowed_command_preserves_remote_exit")
+        case.directory = self.directory
+        with self.assertRaises(AssertionError) as caught:
+            case.assertEqual(1, 2, "original-message")
+        self.assertIn("original-message", str(caught.exception))
+        self.assertIn("diagnostic-marker", str(caught.exception))
+        with mock.patch(__name__ + ".ssh_log_tail") as read_log:
+            case.assertEqual(1, 1)
+            read_log.assert_not_called()
+
+    def test_client_errors_keep_identity_and_gain_log_note(self):
+        case = SSHIntegrationTests("test_allowed_command_preserves_remote_exit")
+        case.directory = self.directory
+        case.ssh, case.port, case.username, case.environment = "ssh", 12345, "fixture", {}
+        for error in (subprocess.TimeoutExpired("ssh", 10), OSError("client unavailable")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch("subprocess.run", side_effect=error):
+                    with self.assertRaises(type(error)) as caught:
+                        case.request(ALLOWED)
+                self.assertIs(caught.exception, error)
+                self.assertIn("[log unavailable]", error.__notes__[0])
