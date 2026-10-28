@@ -101,7 +101,7 @@ class PreflightTests(unittest.TestCase):
                 root.mkdir(parents=True)
                 sync = root / "sync.sh"
                 # 출력과 함께 표식 파일도 남긴다. 출력을 버리고 기본 설치를 도는 회귀는 표식으로만 드러난다.
-                sync.write_text(marker_script(marker, f"printf '{marker.name}'"))
+                sync.write_text(marker_script(marker, "printf %s " + shlex.quote(marker.name)))
                 sync.chmod(0o700)
             installed_entry = custom / "ssh-entry.sh"
             installed_entry.write_bytes(entry.read_bytes())
