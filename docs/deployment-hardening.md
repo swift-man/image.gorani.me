@@ -77,6 +77,13 @@ recover가 이전 포인터로 복원하며 실패 SHA를 차단하는지 검증
 그대로 복사하지 않습니다. 운영 SSH 로그나 키 파일은 읽지 않습니다. 포트 바인딩 충돌 자동 재시도와
 Linux 환경 검증은 아직 포함하지 않습니다.
 
+공개 저장소의 Actions 실패 로그에도 이 진단이 노출될 수 있습니다. CI는 운영 계정/키가 없는
+GitHub-hosted 장비에서만 실행하고, 로컬 실패 로그를 공유하기 전에는 사용자명과 경로를 검토합니다.
+서버 로그는 클래스 전체에서 공유하므로 이전 시험 기록이 섞일 수 있으며 해당 요청만의 로그가 아닙니다.
+단언 진단은 unittest의 비공개 `_formatMessage` 훅에 의존하므로 Python 지원 버전을 확대할 때
+`SSHDiagnosticsTests`로 첨부 여부를 재검증합니다. `add_note`는 프로젝트 최소 버전인 Python 3.11
+이상에서 사용하며 3.10 이하 호환 분기는 제공하지 않습니다.
+
 `tests/test_ssh_integration.py`는 별도의 임시 sshd를 loopback의 임의 포트에 띄워 실제 SSH 연결로
 `restrict,command=`를 검사합니다. 임시 호스트 키와 접속 키만 사용하고 사용자/시스템 SSH 설정,
 authorized_keys, known_hosts는 사용하거나 변경하지 않습니다. 호스트키는 생성한 공개키로 고정하며

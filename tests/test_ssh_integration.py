@@ -125,6 +125,8 @@ LogLevel VERBOSE
 
     def _formatMessage(self, msg, standardMsg):
         # unittest의 단언 실패 경로에서만 읽는다. 성공/예상된 SSH 거부는 출력하지 않는다.
+        # 비공개 훅이므로 Python 지원 버전을 늘릴 때 진단 회귀 시험을 확인한다.
+        # 서버는 클래스 전체에서 공유되어 이전 시험 로그도 끝부분에 포함될 수 있다.
         return super()._formatMessage(msg, standardMsg) + ssh_log_tail(self.directory)
 
     def request(self, command=None, *, key="client", options=()):
