@@ -500,8 +500,7 @@ class InstallerTests(unittest.TestCase):
         self.addCleanup(home.stop)
 
     def test_installer_preserves_environment_and_adds_login_interval_agent(self):
-        with patch.object(deploy.Path, "home", return_value=self.home), \
-                patch.object(deploy.sys, "platform", "darwin"), \
+        with patch.object(deploy.sys, "platform", "darwin"), \
                 patch.object(deploy.Deployer, "run"), patch.object(deploy.Deployer, "healthy"):
             deploy.install(self.root, self.source)
         service = plistlib.loads(self.agent.read_bytes())
@@ -531,8 +530,7 @@ class InstallerTests(unittest.TestCase):
         # 문서용 주소만 사용하며 실제 네트워크/launchd에는 접근하지 않는다.
         service["EnvironmentVariables"]["IMAGE_UPLOAD_HOST"] = "192.0.2.15"
         self.agent.write_bytes(plistlib.dumps(service))
-        with patch.object(deploy.Path, "home", return_value=self.home), \
-                patch.object(deploy.sys, "platform", "darwin"), \
+        with patch.object(deploy.sys, "platform", "darwin"), \
                 patch.object(deploy.Deployer, "run"), patch.object(deploy.Deployer, "healthy"):
             deploy.install(self.root, self.source)
         config = json.loads((self.root / "config.json").read_text())
@@ -543,8 +541,7 @@ class InstallerTests(unittest.TestCase):
         def run(_manager, args, **_kwargs):
             if "bootstrap" in args and args[-1] == self.updater:
                 raise RuntimeError("bootstrap failed")
-        with patch.object(deploy.Path, "home", return_value=self.home), \
-                patch.object(deploy.sys, "platform", "darwin"), \
+        with patch.object(deploy.sys, "platform", "darwin"), \
                 patch.object(deploy.Deployer, "run", autospec=True, side_effect=run), \
                 patch.object(deploy.Deployer, "healthy"), patch.object(deploy.subprocess, "run") as cleanup:
             with self.assertRaisesRegex(RuntimeError, "bootstrap failed"):
@@ -616,8 +613,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(self.agent.read_bytes(), self.original)
 
     def test_preparation_failure_does_not_restart_existing_service(self):
-        with patch.object(deploy.Path, "home", return_value=self.home), \
-                patch.object(deploy.sys, "platform", "darwin"), \
+        with patch.object(deploy.sys, "platform", "darwin"), \
                 patch.object(deploy, "write_json", side_effect=OSError("disk full")), \
                 patch.object(deploy.subprocess, "run") as cleanup, \
                 self.assertRaisesRegex(OSError, "disk full"):
@@ -635,8 +631,7 @@ class InstallerTests(unittest.TestCase):
                     del service[name]
                 before = plistlib.dumps(service)
                 self.agent.write_bytes(before)
-                with patch.object(deploy.Path, "home", return_value=self.home), \
-                        patch.object(deploy.sys, "platform", "darwin"), \
+                with patch.object(deploy.sys, "platform", "darwin"), \
                         patch.object(deploy.subprocess, "Popen") as popen, \
                         self.assertRaisesRegex(RuntimeError, name):
                     deploy.install(self.root, self.source)
