@@ -46,6 +46,7 @@ def run_entry(entry, home, command):
                     os.killpg(process.pid, 0)
                 except (ProcessLookupError, PermissionError):
                     # macOS 는 좀비만 남은 그룹에 EPERM 을 돌려준다. 좀비는 더 실행하지 않는다.
+                    # 같은 사용자 fixture 전용 판정이다. EPERM만으로 임의 그룹의 종료를 보증하지 않는다.
                     break
                 if time.monotonic() >= deadline:
                     raise AssertionError("SSH 진입점이 남긴 프로세스가 5초 안에 끝나지 않았습니다. "
