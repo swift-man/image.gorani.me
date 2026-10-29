@@ -243,3 +243,66 @@ class SSHDiagnosticsTests(unittest.TestCase):
                         case.request(ALLOWED)
                 self.assertIs(caught.exception, error)
                 self.assertIn("[log unavailable]", error.__notes__[0])
+
+    def check_startup_failure(self, *, exited):
+        # 실제 통합 시험 클래스의 상태/cleanup 목록을 오염시키지 않고 setup 전체를 호출한다.
+        class StartupCase(SSHIntegrationTests):
+            pass
+
+        server = mock.Mock()
+        server.poll.return_value = 1 if exited else None
+        probe = mock.MagicMock()
+        probe.__enter__.return_value.getsockname.return_value = ("127.0.0.1", 12345)
+        logs = []
+
+        def fake_keygen(args, **kwargs):
+            # setup이 읽는 공개키만 만든다. 실제 키 생성/프로세스 실행은 없다.
+            Path(args[-1] + ".pub").write_text("ssh-ed25519 fixture-key\n")
+
+        def fake_popen(args, **kwargs):
+            log = kwargs["stderr"]
+            log.write(b"startup-diagnostic-marker")
+            log.flush()
+            logs.append(log)
+            return server
+
+        # timeout 경로는 10초 경계까지 가짜 시계를 진행시켜 실제 대기를 없앤다.
+        with mock.patch("os.getuid", return_value=1000), \
+                mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_name="fixture")), \
+                mock.patch("shutil.which", return_value="/bin/sh"), \
+                mock.patch("subprocess.run", side_effect=fake_keygen) as keygen, \
+                mock.patch("subprocess.Popen", side_effect=fake_popen) as popen, \
+                mock.patch("socket.socket", return_value=probe), \
+                mock.patch("socket.create_connection", side_effect=ConnectionRefusedError) as connect, \
+                mock.patch("time.monotonic", side_effect=[100.0, 110.0]), \
+                mock.patch("time.sleep") as sleep:
+            try:
+                with self.assertRaises(RuntimeError) as caught:
+                    StartupCase.setUpClass()
+            finally:
+                # unittest가 setup 실패 시 수행하는 class cleanup을 동일하게 실행한다.
+                StartupCase.doClassCleanups()
+
+        prefix = "isolated sshd exited" if exited else "isolated sshd startup timed out"
+        self.assertTrue(str(caught.exception).startswith(prefix))
+        self.assertIn("startup-diagnostic-marker", str(caught.exception))
+        self.assertIn("last 4096 bytes", str(caught.exception))
+        self.assertEqual(keygen.call_count, 3)
+        popen.assert_called_once()
+        sleep.assert_not_called()
+        if exited:
+            connect.assert_not_called()
+            server.terminate.assert_not_called()
+        else:
+            connect.assert_called_once_with(("127.0.0.1", 12345), timeout=0.2)
+            server.terminate.assert_called_once_with()
+            server.wait.assert_called_once_with(timeout=5)
+        self.assertEqual(StartupCase.tearDown_exceptions, [])
+        self.assertTrue(logs[0].closed)
+        self.assertFalse(StartupCase.directory.exists())
+
+    def test_setup_early_exit_includes_log_and_cleans_resources(self):
+        self.check_startup_failure(exited=True)
+
+    def test_setup_timeout_includes_log_and_cleans_resources(self):
+        self.check_startup_failure(exited=False)
