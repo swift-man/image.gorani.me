@@ -20,6 +20,21 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED = 'exec "$HOME/Library/Application Support/gorani-image-upload/deploy/sync.sh"'
 
 
+class BoundedClock:
+    """조회는 시간을 진행시키지 않되 정체된 시험의 무한 조회는 차단한다."""
+
+    def __init__(self):
+        self.now = 100.0
+        self.reads = 0
+
+    def __call__(self):
+        self.reads += 1
+        # 정상 조회 횟수와는 독립적인 넉넉한 안전 상한이다. 시간 변경으로 초기화하지 않는다.
+        if self.reads > 1000:
+            raise AssertionError("SSH fixture clock read limit exceeded (1000)")
+        return self.now
+
+
 def ssh_log_tail(directory):
     """임시 서버 로그만 제한된 크기로 읽어 최초 실패의 진단을 보조한다."""
     try:
@@ -342,17 +357,17 @@ class SSHDiagnosticsTests(unittest.TestCase):
         class StartupCase(SSHIntegrationTests):
             pass
 
-        clock = mock.Mock(return_value=100.0)
+        clock = BoundedClock()
 
         def poll_server():
             # 진단용 시계 조회가 늘어도 시간이 소모되거나 StopIteration이 나지 않아야 한다.
             for _ in range(extra_clock_reads):
-                self.assertEqual(time.monotonic(), clock.return_value)
+                self.assertEqual(time.monotonic(), clock.now)
             return 1 if exited else None
 
         def refuse_connection(*args, **kwargs):
             # 시간 진행은 조회 횟수가 아니라 연결 실패 사건에 연결한다.
-            clock.return_value = 110.0
+            clock.now = 110.0
             for _ in range(extra_clock_reads):
                 self.assertEqual(time.monotonic(), 110.0)
             raise ConnectionRefusedError
@@ -419,3 +434,16 @@ class SSHDiagnosticsTests(unittest.TestCase):
         for exited in (True, False):
             with self.subTest(exited=exited):
                 self.check_startup_failure(exited=exited, extra_clock_reads=5)
+
+    def test_clock_stall_fails_at_bounded_read_limit(self):
+        for advance in (False, True):
+            with self.subTest(advance=advance):
+                clock = BoundedClock()
+                for _ in range(500):
+                    self.assertEqual(clock(), 100.0)
+                if advance:
+                    clock.now = 110.0
+                for _ in range(500):
+                    self.assertEqual(clock(), 110.0 if advance else 100.0)
+                with self.assertRaisesRegex(AssertionError, "clock read limit exceeded"):
+                    clock()
