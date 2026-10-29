@@ -30,6 +30,26 @@ OLD = "a" * 40
 NEW = "b" * 40
 
 
+class LaunchctlRefusingPopen(subprocess.Popen):
+    """launchctl 실행만 거부하고 다른 명령은 그대로 실행하는 Popen."""
+
+    def __init__(self, args, *other, **options):
+        program = options.get("executable") or (
+            args if isinstance(args, (str, bytes, os.PathLike)) else args[0])
+        if Path(os.fsdecode(program)).name == "launchctl":
+            raise AssertionError(f"시험이 실제 launchctl을 실행하려 했습니다: {args!r}")
+        super().__init__(args, *other, **options)
+
+
+def setUpModule():
+    # 배포기는 launchctl을 subprocess로만 부른다(서비스 재시작, 설치와 그 되돌리기). 시험이 대역을 빠뜨리거나
+    # 회귀로 그 경로에 들어가도 시험을 돌린 맥의 실제 서비스(gui/<uid>/me.gorani.image-upload)를 내리거나
+    # 재시작하지 않고 시험이 실패하게 한다. 시험 안에서 Popen이나 run을 대역으로 바꾸면 그 대역이 먼저다.
+    guard = patch.object(subprocess, "Popen", LaunchctlRefusingPopen)
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+
+
 class FakeClock:
     """조회 횟수와 무관하게 sleep으로만 전진하는 테스트 시계."""
     def __init__(self):
@@ -474,6 +494,10 @@ class InstallerTests(unittest.TestCase):
         self.agent.write_bytes(self.original)
         self.root = self.home / "deployment"
         self.updater = self.agent.with_name(f"{deploy.LABEL}.deploy.plist")
+        # 설치가 일찍 멈추는 시험도 실제 홈의 LaunchAgents plist를 읽거나 덮어쓰지 않도록 늘 임시 홈을 쓴다.
+        home = patch.object(deploy.Path, "home", return_value=self.home)
+        home.start()
+        self.addCleanup(home.stop)
 
     def test_installer_preserves_environment_and_adds_login_interval_agent(self):
         with patch.object(deploy.Path, "home", return_value=self.home), \
@@ -529,6 +553,61 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(self.updater.exists())
         self.assertTrue(any(call.args[0][-1].endswith(".deploy") for call in cleanup.call_args_list
                             if isinstance(call.args[0][-1], str)))
+
+    def test_failure_after_service_switch_restores_original_agent(self):
+        # 서비스 plist를 바꾸기 시작한 뒤에는 어디서 실패하든(중단 예외 포함) updater 없이 원래 서비스로 되돌린다.
+        # 되돌리기는 subprocess.run으로 launchctl을 부르며 bootout의 결과와 상관없이 원래 plist를 다시 띄워야
+        # 한다. 앞 단계가 서비스를 내린 채 실패했으면 launchctl bootout은 3으로 끝나므로 대역의 bootout은 늘
+        # 실패 코드를 돌려준다.
+        write = deploy.atomic_write
+
+        def switch_write_fails_after_replace(path, data, mode=0o600):
+            # 교체(os.replace)는 끝났고 그 뒤 디렉터리 fsync가 실패한 경우다.
+            write(path, data, mode)
+            if path == self.agent and data != self.original:
+                raise OSError("fsync failed")
+
+        def service_bootstrap_fails(args, **_kwargs):
+            if args[1] == "bootstrap":
+                raise deploy.CommandFailed(args[0], 5)
+
+        failures = {
+            # 이름: (기대 예외, 실패시킬 대역 이름, 그 대역의 side_effect)
+            "health": (RuntimeError, "healthy", RuntimeError("unhealthy")),
+            "interrupted": (deploy.DeploymentInterrupted, "healthy", deploy.DeploymentInterrupted()),
+            "switch-write": (OSError, "atomic_write", switch_write_fails_after_replace),
+            "service-bootstrap": (deploy.CommandFailed, "run", service_bootstrap_fails),
+        }
+        domain = f"gui/{os.getuid()}"
+        for name, (error, target, side_effect) in failures.items():
+            with self.subTest(failure=name):
+                self.agent.write_bytes(self.original)
+                calls, loaded = [], []
+
+                def launchctl(args, **options):
+                    calls.append(args)
+                    if args[1] == "bootstrap":
+                        # 다시 띄우는 시점에 디스크에 있는 plist가 launchd가 읽는 설정이다.
+                        loaded.append(Path(args[-1]).read_bytes())
+                    result = subprocess.CompletedProcess(args, 3 if args[1] == "bootout" else 0)
+                    if options.get("check"):
+                        result.check_returncode()
+                    return result
+
+                doubles = {"run": Mock(), "healthy": Mock(), "atomic_write": Mock(side_effect=write)}
+                doubles[target].side_effect = side_effect
+                with patch.object(deploy.sys, "platform", "darwin"), \
+                        patch.object(deploy.Deployer, "run", doubles["run"]), \
+                        patch.object(deploy.Deployer, "healthy", doubles["healthy"]), \
+                        patch.object(deploy, "atomic_write", doubles["atomic_write"]), \
+                        patch.object(deploy.subprocess, "run", side_effect=launchctl), \
+                        self.assertRaises(error):
+                    deploy.install(self.home / f"deployment-{name}", self.source)
+                self.assertEqual(self.agent.read_bytes(), self.original)
+                self.assertFalse(self.updater.exists())
+                self.assertEqual(calls, [["/bin/launchctl", "bootout", f"{domain}/{deploy.LABEL}"],
+                                         ["/bin/launchctl", "bootstrap", domain, self.agent]])
+                self.assertEqual(loaded, [self.original])
 
     def test_existing_installation_is_not_overwritten(self):
         self.root.mkdir()

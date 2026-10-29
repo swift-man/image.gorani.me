@@ -206,6 +206,13 @@ class SSHDiagnosticsTests(unittest.TestCase):
         self.directory = Path(temporary.name)
         self.log = self.directory / "sshd.log"
 
+    def integration_case(self):
+        """서버 없이 이 시험의 임시 디렉터리를 로그 위치로 쓰는 통합 시험 인스턴스."""
+        case = SSHIntegrationTests("test_allowed_command_preserves_remote_exit")
+        case.directory = self.directory
+        case.ssh, case.port, case.username, case.environment = "ssh", 12345, "fixture", {}
+        return case
+
     def test_tail_is_bounded_and_keeps_latest_bytes(self):
         self.log.write_bytes(b"discarded-prefix" + b"x" * 4096 + b"latest")
         result = ssh_log_tail(self.directory)
@@ -220,22 +227,108 @@ class SSHDiagnosticsTests(unittest.TestCase):
         self.log.write_bytes(b"\xfflatest")
         self.assertTrue(ssh_log_tail(self.directory).endswith("\ufffdlatest"))
 
+    def test_unreadable_log_is_reported_without_details(self):
+        # 없는 파일이 아니라 열 수 없는 경로(디렉터리)도 경로나 예외 내용 없이 같은 표시만 남긴다.
+        self.log.mkdir()
+        self.assertEqual(ssh_log_tail(self.directory),
+                         "\nIsolated sshd log (last 4096 bytes):\n[log unavailable]")
+
+    def test_reads_only_the_bounded_tail(self):
+        # 전체를 읽은 뒤 결과만 자르는 회귀는 반환값으로 드러나지 않으므로 파일에서 읽은 양을 본다.
+        # 한 번에 요청한 크기와 실제로 읽은 바이트의 합이 모두 4096 이하여야 한다.
+        self.log.write_bytes(b"y" * (1 << 20) + b"end")
+        reads = []
+        real_open = Path.open
+
+        class RecordingReader:
+            def __init__(self, stream):
+                self.stream = stream
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self.stream.close()
+
+            def __getattr__(self, name):
+                return getattr(self.stream, name)
+
+            def read(self, size=-1):
+                data = self.stream.read(size)
+                reads.append((size, len(data)))
+                return data
+
+        with mock.patch.object(Path, "open", lambda path, *args, **kwargs:
+                               RecordingReader(real_open(path, *args, **kwargs))):
+            result = ssh_log_tail(self.directory)
+        self.assertTrue(result.endswith("y" * 4093 + "end"))
+        self.assertTrue(reads)
+        self.assertTrue(all(size is not None and 0 <= size <= 4096 for size, _length in reads), reads)
+        self.assertLessEqual(sum(length for _size, length in reads), 4096, reads)
+
     def test_assertion_failure_preserves_message_and_adds_log(self):
         self.log.write_text("diagnostic-marker")
-        case = SSHIntegrationTests("test_allowed_command_preserves_remote_exit")
-        case.directory = self.directory
+        case = self.integration_case()
         with self.assertRaises(AssertionError) as caught:
             case.assertEqual(1, 2, "original-message")
-        self.assertIn("original-message", str(caught.exception))
+        # unittest의 기본 문구와 msg를 그대로 두고 그 뒤에 진단을 붙인다.
+        self.assertTrue(str(caught.exception).startswith("1 != 2 : original-message"))
         self.assertIn("diagnostic-marker", str(caught.exception))
         with mock.patch(__name__ + ".ssh_log_tail") as read_log:
             case.assertEqual(1, 1)
             read_log.assert_not_called()
 
+    def test_assertions_without_message_also_add_log(self):
+        # msg를 주지 않은 단언과 문자열 비교·포함·참 단언도 같은 진단을 붙인다.
+        self.log.write_text("assert-marker")
+        case = self.integration_case()
+        checks = {
+            # 이름: (단언, unittest의 기본 실패 문구. 문자열 비교의 diff 끝은 Python 버전마다 다르다)
+            "assertEqual(str)": (lambda: case.assertEqual("got", ""), "'got' != ''\n- got\n"),
+            "assertIn": (lambda: case.assertIn("x", "abc"), "'x' not found in 'abc'"),
+            "assertTrue": (lambda: case.assertTrue(False), "False is not true"),
+        }
+        for name, (check, standard) in checks.items():
+            with self.subTest(assertion=name):
+                with self.assertRaises(AssertionError) as caught:
+                    check()
+                message = str(caught.exception)
+                self.assertTrue(message.startswith(standard), message)
+                self.assertTrue(message.endswith("\nIsolated sshd log (last 4096 bytes):\nassert-marker"), message)
+
+    def test_passing_tests_do_not_read_log(self):
+        # 실제 통합 시험 본문을 성공하는 SSH 결과로 돌린다. 성공한 시험은 준비/정리 단계와 assertEqual·assertIn
+        # 어디에서도 로그를 읽지 않는다.
+        results = {
+            "test_allowed_command_preserves_remote_exit": subprocess.CompletedProcess([], 23, "isolated-sync", ""),
+            "test_unregistered_key_cannot_authenticate": subprocess.CompletedProcess(
+                [], 255, "", "fixture@127.0.0.1: Permission denied (publickey)."),
+        }
+        for name, completed in results.items():
+            with self.subTest(test=name):
+                case = self.integration_case()
+                with mock.patch(__name__ + ".ssh_log_tail") as read_log, \
+                        mock.patch("subprocess.run", return_value=completed) as run:
+                    case.setUp()
+                    getattr(case, name)()
+                    case.tearDown()
+                run.assert_called_once()
+                read_log.assert_not_called()
+
+    def test_client_error_note_is_this_servers_log_tail(self):
+        # 노트는 한 개이며 이 시험의 서버 로그 끝부분 전체다(다른 위치를 읽거나 잘라 붙이지 않는다).
+        self.log.write_text("p" * 200 + "client-marker")
+        case = self.integration_case()
+        for error in (subprocess.TimeoutExpired("ssh", 10), OSError("client unavailable")):
+            with self.subTest(error=type(error).__name__):
+                with mock.patch("subprocess.run", side_effect=error):
+                    with self.assertRaises(type(error)):
+                        case.request(ALLOWED)
+                self.assertEqual(error.__notes__,
+                                 ["\nIsolated sshd log (last 4096 bytes):\n" + "p" * 200 + "client-marker"])
+
     def test_client_errors_keep_identity_and_gain_log_note(self):
-        case = SSHIntegrationTests("test_allowed_command_preserves_remote_exit")
-        case.directory = self.directory
-        case.ssh, case.port, case.username, case.environment = "ssh", 12345, "fixture", {}
+        case = self.integration_case()
         for error in (subprocess.TimeoutExpired("ssh", 10), OSError("client unavailable")):
             with self.subTest(error=type(error).__name__):
                 with mock.patch("subprocess.run", side_effect=error):
