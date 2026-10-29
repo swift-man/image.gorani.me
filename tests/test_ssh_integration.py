@@ -244,13 +244,28 @@ class SSHDiagnosticsTests(unittest.TestCase):
                 self.assertIs(caught.exception, error)
                 self.assertIn("[log unavailable]", error.__notes__[0])
 
-    def check_startup_failure(self, *, exited):
+    def check_startup_failure(self, *, exited, extra_clock_reads=0):
         # 실제 통합 시험 클래스의 상태/cleanup 목록을 오염시키지 않고 setup 전체를 호출한다.
         class StartupCase(SSHIntegrationTests):
             pass
 
+        clock = mock.Mock(return_value=100.0)
+
+        def poll_server():
+            # 진단용 시계 조회가 늘어도 시간이 소모되거나 StopIteration이 나지 않아야 한다.
+            for _ in range(extra_clock_reads):
+                self.assertEqual(time.monotonic(), clock.return_value)
+            return 1 if exited else None
+
+        def refuse_connection(*args, **kwargs):
+            # 시간 진행은 조회 횟수가 아니라 연결 실패 사건에 연결한다.
+            clock.return_value = 110.0
+            for _ in range(extra_clock_reads):
+                self.assertEqual(time.monotonic(), 110.0)
+            raise ConnectionRefusedError
+
         server = mock.Mock()
-        server.poll.return_value = 1 if exited else None
+        server.poll.side_effect = poll_server
         probe = mock.MagicMock()
         probe.__enter__.return_value.getsockname.return_value = ("127.0.0.1", 12345)
         logs = []
@@ -273,8 +288,8 @@ class SSHDiagnosticsTests(unittest.TestCase):
                 mock.patch("subprocess.run", side_effect=fake_keygen) as keygen, \
                 mock.patch("subprocess.Popen", side_effect=fake_popen) as popen, \
                 mock.patch("socket.socket", return_value=probe), \
-                mock.patch("socket.create_connection", side_effect=ConnectionRefusedError) as connect, \
-                mock.patch("time.monotonic", side_effect=[100.0, 110.0]), \
+                mock.patch("socket.create_connection", side_effect=refuse_connection) as connect, \
+                mock.patch("time.monotonic", clock), \
                 mock.patch("time.sleep") as sleep:
             try:
                 with self.assertRaises(RuntimeError) as caught:
@@ -306,3 +321,8 @@ class SSHDiagnosticsTests(unittest.TestCase):
 
     def test_setup_timeout_includes_log_and_cleans_resources(self):
         self.check_startup_failure(exited=False)
+
+    def test_startup_diagnostics_tolerate_extra_clock_reads(self):
+        for exited in (True, False):
+            with self.subTest(exited=exited):
+                self.check_startup_failure(exited=exited, extra_clock_reads=5)
